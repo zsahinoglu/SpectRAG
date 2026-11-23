@@ -1,0 +1,48 @@
+# Index data — large binaries, regenerate with: python main.py index <docs>
+rag_index/
+
+# Evaluation outputs — regenerable artifacts, not source
+evaluation/results/
+evaluation/.work/
+generation_eval/results/
+generation_eval/results_Musique/
+generation_eval/.work/
+generation_eval/.work_multihop/
+generation_eval/.cache/
+generation_eval/.musique_cache/
+generation_eval/.cache_debug/
+
+# Installed Claude Code plugin, not project code
+claude-council/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Frontend
+frontend/dist/
+frontend/node_modules/
+
+# Environment / secrets
+.env
+*.env
+
+# macOS
+.DS_Store
+
+# Legal Stage-4 A/B cache (build artifact)
+generation_eval/.legal_cache/
+
+# LLM concept-extraction cache (build artifact)
+.concept_cache/
+
+# LLM utility-question cache + chunk-embedding cache (build artifacts)
+.uq_cache/
+.embedding_cache/
+
+# LightRAG baseline (isolated venv + per-domain working dirs)
+generation_eval/lightrag_env/
+generation_eval/.lightrag_work/
