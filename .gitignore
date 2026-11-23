@@ -46,3 +46,9 @@ generation_eval/.legal_cache/
 # LightRAG baseline (isolated venv + per-domain working dirs)
 generation_eval/lightrag_env/
 generation_eval/.lightrag_work/
+
+# Agent team
+.claude/worktrees/
+.claude/settings.local.json
+logs/
+.venv/

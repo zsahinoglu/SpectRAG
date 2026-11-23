@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest *)",
+      "Bash(python -m pytest)",
+      "Bash(pytest *)",
+      "Bash(python -m eval *)",
+      "Bash(python -m pip install *)",
+      "Bash(pip install *)",
+      "Bash(ruff *)",
+      "Bash(mypy *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git switch *)",
+      "Bash(git checkout *)",
+      "Bash(git fetch *)",
+      "Bash(git rebase *)",
+      "Bash(git restore *)",
+      "Bash(git stash *)",
+      "Bash(git push -u origin *)",
+      "Bash(git push origin *)",
+      "Bash(scripts/board.sh *)",
+      "Bash(git merge origin/main*)",
+      "Bash(git branch *)",
+      "Bash(git worktree list*)"
+    ],
+    "deny": [
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push origin main)",
+      "Bash(git push origin main *)",
+      "Bash(git push origin master *)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(~/.config/spectrag/**)",
+      "Bash(scripts/merge-gate.sh*)",
+      "Bash(scripts/release-local.sh*)",
+      "Bash(scripts/setup-local.sh*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/git_guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}
