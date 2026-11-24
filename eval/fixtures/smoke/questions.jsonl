@@ -1,0 +1,8 @@
+{"qid": "s01", "question": "What does fusion in the stellar core convert hydrogen into?", "answers": ["helium"], "evidence": ["astro"]}
+{"qid": "s02", "question": "Which ingredients does bread dough need?", "answers": ["flour, water, yeast and salt"], "evidence": ["bread"]}
+{"qid": "s03", "question": "How do you thicken sauces with butter and flour?", "answers": ["a roux"], "evidence": ["sauces"]}
+{"qid": "s04", "question": "Which planets have atmospheres of hydrogen or carbon dioxide?", "answers": [], "evidence": ["planets"]}
+{"qid": "s05", "question": "Which gas is released both by yeast in rising dough and found in the atmosphere of Mars?", "answers": ["carbon dioxide"], "evidence": ["bread", "planets"]}
+{"qid": "s06", "question": "How far does Earth orbit from the Sun, and how old is the Sun?", "answers": [], "evidence": ["planets", "astro"]}
+{"qid": "s07", "question": "Which butter-based emulsion uses egg yolk and lemon juice?", "answers": ["hollandaise"], "evidence": ["sauces"]}
+{"qid": "s08", "question": "What remains after a massive star explodes as a supernova?", "answers": ["a neutron star or a black hole"], "evidence": ["astro"]}
