@@ -1,0 +1,88 @@
+{
+  "How do stars produce energy through fusion?": {
+    "answer": "ANSWER:astro-1|astro-2|astro-0|astro-4|astro-3|astro-5",
+    "scores": {
+      "astro-0": 0.71063,
+      "astro-1": 1.0,
+      "astro-2": 0.72243,
+      "astro-3": 0.54381,
+      "astro-4": 0.67745,
+      "astro-5": 0.54276
+    },
+    "selected": [
+      "astro-1",
+      "astro-2",
+      "astro-0",
+      "astro-4",
+      "astro-3",
+      "astro-5"
+    ]
+  },
+  "How do you thicken sauces with flour?": {
+    "answer": "ANSWER:cook-4|cook-3|astro-3|cook-2|cook-5|cook-0|astro-4|cook-1|astro-2",
+    "scores": {
+      "astro-2": 0.43636,
+      "astro-3": 0.76298,
+      "astro-4": 0.53747,
+      "cook-0": 0.58622,
+      "cook-1": 0.45736,
+      "cook-2": 0.74251,
+      "cook-3": 0.7857,
+      "cook-4": 0.96762,
+      "cook-5": 0.63267
+    },
+    "selected": [
+      "cook-4",
+      "cook-3",
+      "astro-3",
+      "cook-2",
+      "cook-5",
+      "cook-0",
+      "astro-4",
+      "cook-1",
+      "astro-2"
+    ]
+  },
+  "What ingredients does bread dough need?": {
+    "answer": "ANSWER:cook-0|cook-1|cook-3|cook-5|cook-2|cook-4|astro-1",
+    "scores": {
+      "astro-1": 0.30412,
+      "cook-0": 1.0,
+      "cook-1": 0.72572,
+      "cook-2": 0.46661,
+      "cook-3": 0.68683,
+      "cook-4": 0.45987,
+      "cook-5": 0.64087
+    },
+    "selected": [
+      "cook-0",
+      "cook-1",
+      "cook-3",
+      "cook-5",
+      "cook-2",
+      "cook-4",
+      "astro-1"
+    ]
+  },
+  "Which planets have atmospheres?": {
+    "answer": "ANSWER:astro-3|astro-4|astro-0|cook-5|astro-2|cook-4|astro-1",
+    "scores": {
+      "astro-0": 0.58893,
+      "astro-1": 0.397,
+      "astro-2": 0.40964,
+      "astro-3": 1.0,
+      "astro-4": 0.72806,
+      "cook-4": 0.3981,
+      "cook-5": 0.41169
+    },
+    "selected": [
+      "astro-3",
+      "astro-4",
+      "astro-0",
+      "cook-5",
+      "astro-2",
+      "cook-4",
+      "astro-1"
+    ]
+  }
+}
