@@ -17,6 +17,12 @@ when the harness was built (E0a). This reproduction is follow-up item E0b.
    - Retrieval-only metrics (evidence recall, P@5, MRR) depend on the index-time LLM only through
      concept and utility-question edges, so a gap there that survives the delta comparison
      points at code, not at the generator.
+   - **Caveat (open for E0b):** the delta comparison assumes the model change affects both
+     systems equally. It does not: SpectRAG's retrieval also depends on the index-time LLM
+     (concept/UQ edges), but NaiveRAG's does not. Part of the delta gap may therefore still be
+     model-driven. E0b must separate this, for example with an ablation that builds SpectRAG
+     without concept/UQ edges (retrieval then becomes model-independent) and compares deltas
+     with and without them.
 4. Never call OpenAI to close the gap; if an exact gpt-4o-mini comparison is needed, that is a
    human decision.
 

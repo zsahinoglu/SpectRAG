@@ -38,9 +38,17 @@ class HaikuLLM:
                                   temperature=pins.JUDGE_TEMPERATURE, max_tokens=self.max_tokens)
 
 
+class PaidCallBlocked(RuntimeError):
+    """Raised inside `UsageMeter.watch(forbid=True)` instead of calling the API."""
+
+
 class UsageMeter:
     """Counts Anthropic calls/tokens made anywhere in-process (library code included)
-    by wrapping the SDK's Messages.create. Harness-side only; no library change."""
+    by wrapping the SDK's Messages.create. Harness-side only; no library change.
+
+    `calls` counts attempts, before the request is sent, so an attempt is recorded even
+    if it fails or if library code swallows the exception. With `forbid=True` (smoke)
+    every attempt raises PaidCallBlocked and nothing reaches the network."""
 
     def __init__(self) -> None:
         self.calls = self.input_tokens = self.output_tokens = 0
@@ -51,7 +59,7 @@ class UsageMeter:
                 "output_tokens": self.output_tokens}
 
     @contextlib.contextmanager
-    def watch(self):
+    def watch(self, forbid: bool = False):
         try:
             from anthropic.resources.messages import Messages
         except ImportError:  # SDK absent: nothing can be called, nothing to count
@@ -61,10 +69,13 @@ class UsageMeter:
         meter = self
 
         def create(self_, *a, **kw):
+            with meter._lock:
+                meter.calls += 1
+            if forbid:
+                raise PaidCallBlocked("Anthropic Messages.create called during an offline run")
             resp = original(self_, *a, **kw)
             usage = getattr(resp, "usage", None)
             with meter._lock:
-                meter.calls += 1
                 meter.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
                 meter.output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
             return resp

@@ -8,7 +8,7 @@ import pytest
 
 import eval.__main__ as cli
 from eval import data, fakes, judge, metrics, pins
-from eval.runner import evaluate_dataset, smoke_config
+from eval.runner import smoke_config
 
 
 # ---- metrics ----------------------------------------------------------------
@@ -57,6 +57,21 @@ def test_pairwise_judge_swaps_order_and_scores():
     assert llm.prompts[0][0] == pins.JUDGE_SYSTEM
     out = judge.pairwise(_Fixed("garbage", "TIE."), "q", "s", "n")
     assert out == {"invalid": 1, "score": 0.5}
+    # "Answer B" in sys_first order means the baseline won; it must never count as a
+    # system win (it used to be read as "A"). Non-verdicts are INVALID, not guessed.
+    out = judge.pairwise(_Fixed("Answer B", "Both"), "q", "s", "n")
+    assert out == {"invalid": 2, "score": 0.5}
+    assert judge.pairwise(_Fixed("B.", "**A**"), "q", "s", "n") == {"invalid": 0, "score": 0.0}
+    assert judge.pairwise(_Fixed("a\n", "tie"), "q", "s", "n") == {"invalid": 0, "score": 0.75}
+
+
+@pytest.mark.parametrize("reply,verdict", [
+    ("A", "A"), ("B.", "B"), (" `TIE` ", "TIE"), ("tie", "TIE"),
+    ("Answer B", "INVALID"), ("Both", "INVALID"), ("Baseline is better", "INVALID"),
+    ("A and B are equal", "INVALID"), ("TIEBREAK", "INVALID"), ("", "INVALID"), (None, "INVALID"),
+])
+def test_judge_verdict_parser_is_strict(reply, verdict):
+    assert judge._verdict(reply) == verdict
 
 
 def test_contamination_reports_aggregates_only():
@@ -120,11 +135,9 @@ def test_loader_sorts_and_limits(tmp_path):
 # ---- smoke run ---------------------------------------------------------------
 
 def _smoke():
-    ds = data.load_dataset(pins.SMOKE_DIR.parent, pins.SMOKE_DIR.name)
-    return evaluate_dataset(smoke_config(), ds, offline=True, embedder=fakes.HashEmbedder(),
-                            encoder=fakes.WhitespaceEncoder(),
-                            generator=fakes.ExtractiveGenerator(),
-                            judge_llm=fakes.LexicalJudgeLLM())
+    result = cli.run_smoke()  # the same metered path as `python -m eval smoke`
+    assert result["llm_calls_attempted"] == 0 and result["error"] is None
+    return result["datasets"]["smoke"]
 
 
 def test_smoke_metrics_are_deterministic_and_sane():
@@ -137,7 +150,6 @@ def test_smoke_metrics_are_deterministic_and_sane():
     assert quality(a) == quality(b)
     spec, naive = a["systems"]["spectrag"], a["systems"]["naiverag"]
     assert spec["top10_stability"] == 1.0
-    assert a["index"]["cost"]["llm_calls"] == 0
     for m in (spec, naive):
         assert 0 < m["evidence_recall"] <= 1 and 0 <= m["mrr"] <= 1 and "em" in m and "f1" in m
     assert 0 <= spec["judge_win_rate_vs_naiverag"] <= 1
@@ -153,6 +165,79 @@ def test_smoke_cli_runs_fast_and_passes(capsys):
     assert "| smoke | spectrag |" in out and "smoke ok" in out
     with capsys.disabled():  # visible with `pytest -s`: the smoke table in CI logs
         print("\n" + out)
+
+
+@pytest.fixture
+def sdk(monkeypatch):
+    """The real `anthropic` SDK if installed, else a minimal stand-in with the same
+    `anthropic.resources.messages.Messages.create` seam the meter wraps. Either way the
+    unwrapped `create` must never be reached in these tests."""
+    try:
+        import anthropic
+        from anthropic.resources.messages import Messages
+    except ImportError:
+        import sys
+        import types
+
+        class Messages:
+            def create(self, *a, **kw):
+                raise AssertionError("network call reached the (stand-in) SDK")
+
+        class Anthropic:
+            def __init__(self, api_key=None):
+                self.messages = Messages()
+
+        anthropic = types.ModuleType("anthropic")
+        resources = types.ModuleType("anthropic.resources")
+        messages = types.ModuleType("anthropic.resources.messages")
+        messages.Messages, anthropic.Anthropic = Messages, Anthropic
+        anthropic.resources, resources.messages = resources, messages
+        for name, mod in (("anthropic", anthropic), ("anthropic.resources", resources),
+                          ("anthropic.resources.messages", messages)):
+            monkeypatch.setitem(sys.modules, name, mod)
+    return anthropic, Messages
+
+
+def _paid_call(anthropic):
+    anthropic.Anthropic(api_key="dummy-never-sent").messages.create(
+        model=pins.JUDGE_MODEL, max_tokens=1, messages=[{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.parametrize("swallowed", [False, True])
+def test_smoke_fails_when_a_paid_call_is_attempted(monkeypatch, capsys, sdk, swallowed):
+    """The no-paid-calls invariant must actually fire, even if the calling code
+    swallows the exception (as library fallbacks may)."""
+    anthropic, Messages = sdk
+    original = Messages.create
+
+    def generate(self, question, chunks):
+        try:
+            _paid_call(anthropic)
+        except Exception:
+            if not swallowed:
+                raise
+        return ""
+
+    monkeypatch.setattr(fakes.ExtractiveGenerator, "generate", generate)
+    assert cli.main(["smoke"]) == 1
+    err = capsys.readouterr().err
+    assert "SMOKE FAIL" in err and "paid LLM call" in err
+    assert Messages.create is original  # the meter restores the SDK
+
+
+def test_usage_meter_counts_calls_and_tokens(monkeypatch, sdk):
+    from types import SimpleNamespace
+    from eval.llm import UsageMeter
+    anthropic, Messages = sdk
+    fake_resp = SimpleNamespace(usage=SimpleNamespace(input_tokens=7, output_tokens=3))
+    monkeypatch.setattr(Messages, "create", lambda self_, *a, **kw: fake_resp)
+    meter = UsageMeter()
+    with meter.watch():
+        _paid_call(anthropic)
+        _paid_call(anthropic)
+    assert meter.as_dict() == {"llm_calls": 2, "input_tokens": 14, "output_tokens": 6}
+    _paid_call(anthropic)  # outside watch(): not counted
+    assert meter.calls == 2
 
 
 # ---- run preconditions fail clearly -------------------------------------------
@@ -183,6 +268,18 @@ def test_release_requires_every_dataset(monkeypatch, tmp_path, capsys):
 def test_release_rejects_limit():
     with pytest.raises(SystemExit):
         cli.main(["run", "--release", "--limit", "5"])
+
+
+def test_release_rejects_dataset_subset(monkeypatch, tmp_path, capsys):
+    """A one-dataset run must not be able to pass as a complete release run."""
+    monkeypatch.setenv("SPECTRAG_ANTHROPIC_API_KEY", "dummy")
+    monkeypatch.setenv("SPECTRAG_TEST_DIR", str(tmp_path))
+    (tmp_path / "hotpotqa").mkdir()
+    (tmp_path / "hotpotqa" / "corpus.jsonl").write_text("")
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--release", "--datasets", "hotpotqa"])
+    assert e.value.code != 0
+    assert "--datasets is not allowed with --release" in capsys.readouterr().err
 
 
 def test_dev_with_no_datasets_exits_2(monkeypatch, tmp_path, capsys):

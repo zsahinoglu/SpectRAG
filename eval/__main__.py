@@ -50,23 +50,39 @@ def _smoke_invariants(result: dict) -> list[str]:
                     bad.append(f"{ds}/{name}/{k} out of [0,1]: {m[k]}")
         if r["systems"]["spectrag"]["top10_stability"] != 1.0:
             bad.append(f"{ds}: offline build is not deterministic (top-10 stability < 1)")
-        if r["index"]["cost"]["llm_calls"]:
-            bad.append(f"{ds}: smoke made paid LLM calls")
+    if result["llm_calls_attempted"]:
+        bad.append(f"smoke attempted {result['llm_calls_attempted']} paid LLM call(s)")
     return bad
 
 
-def cmd_smoke(args) -> int:
+def run_smoke() -> dict:
+    """The whole smoke run (build, query, generate, judge) happens under a meter that
+    counts and blocks every Anthropic SDK call, so "no paid calls" is checked, not assumed."""
     from eval import fakes
+    from eval.llm import PaidCallBlocked, UsageMeter
     from eval.runner import envelope, evaluate_dataset, smoke_config
     t0 = time.perf_counter()
     cfg = smoke_config()
     ds = data.load_dataset(pins.SMOKE_DIR.parent, pins.SMOKE_DIR.name)
-    r = evaluate_dataset(cfg, ds, offline=True, embedder=fakes.HashEmbedder(),
-                         encoder=fakes.WhitespaceEncoder(), generator=fakes.ExtractiveGenerator(),
-                         judge_llm=fakes.LexicalJudgeLLM())
-    result = envelope("smoke", cfg, {"smoke": r}, {"offline_fakes": True,
-                      "elapsed_s": round(time.perf_counter() - t0, 2)})
-    print(_table(result))
+    meter = UsageMeter()
+    datasets, error = {}, None
+    try:
+        with meter.watch(forbid=True):
+            datasets["smoke"] = evaluate_dataset(
+                cfg, ds, offline=True, embedder=fakes.HashEmbedder(),
+                encoder=fakes.WhitespaceEncoder(), generator=fakes.ExtractiveGenerator(),
+                judge_llm=fakes.LexicalJudgeLLM())
+    except PaidCallBlocked as e:
+        error = str(e)
+    return envelope("smoke", cfg, datasets, {
+        "offline_fakes": True, "llm_calls_attempted": meter.calls, "error": error,
+        "elapsed_s": round(time.perf_counter() - t0, 2)})
+
+
+def cmd_smoke(args) -> int:
+    result = run_smoke()
+    if result["datasets"]:
+        print(_table(result))
     if args.save:
         print(f"saved {_save(result, 'smoke')}")
     bad = _smoke_invariants(result)
@@ -89,9 +105,9 @@ def cmd_run(args) -> int:
     if not root.is_dir():
         print(f"eval: {level} split not found at {root} (set {env})", file=sys.stderr)
         return 2
-    wanted = args.datasets or list(pins.DATASETS)
+    wanted = list(pins.DATASETS) if args.release else (args.datasets or list(pins.DATASETS))
     present = data.available(root, wanted)
-    missing = sorted(set(wanted) - set(present))
+    missing = sorted(set(pins.DATASETS) - set(present))  # vs. all six, so subsets are visible
     if args.release and missing:
         print(f"eval: release run needs every dataset; missing under {env}: {missing}",
               file=sys.stderr)
@@ -114,7 +130,10 @@ def cmd_run(args) -> int:
         results[name] = evaluate_dataset(cfg, ds, offline=False, generator=generator,
                                          judge_llm=judge_llm, meter=UsageMeter())
     result = envelope(level, cfg, results, {"contamination": contamination,
-                                            "skipped_datasets": missing, "limit": args.limit})
+                                            "evaluated_datasets": list(present),
+                                            "skipped_datasets": missing,
+                                            "complete": not missing and not args.limit,
+                                            "limit": args.limit})
     print(_table(result))
     print(f"saved {_save(result, level)}")
     return 0
@@ -134,6 +153,8 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     if getattr(args, "release", False) and args.limit:
         p.error("--limit is not allowed with --release")
+    if getattr(args, "release", False) and args.datasets:
+        p.error("--datasets is not allowed with --release (all six datasets are required)")
     logging.basicConfig(level=logging.WARNING)
     try:
         return cmd_smoke(args) if args.cmd == "smoke" else cmd_run(args)

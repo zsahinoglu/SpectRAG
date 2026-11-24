@@ -7,6 +7,7 @@ from collections import Counter
 
 import numpy as np
 
+_PUNCT = frozenset(string.punctuation)
 
 def evidence_recall(selected_doc_ids: list[str], evidence: list[str]) -> float:
     """Share of gold evidence documents present in the token-budgeted context."""
@@ -31,7 +32,7 @@ def reciprocal_rank(ranked_doc_ids: list[str], evidence: list[str]) -> float:
 def normalize_answer(s: str) -> str:
     """SQuAD/HotpotQA normalisation."""
     s = s.lower()
-    s = "".join(ch for ch in s if ch not in set(string.punctuation))
+    s = "".join(ch for ch in s if ch not in _PUNCT)
     s = re.sub(r"\b(a|an|the)\b", " ", s)
     return " ".join(s.split())
 

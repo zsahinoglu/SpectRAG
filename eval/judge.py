@@ -1,14 +1,18 @@
 """Pairwise LLM judge (pinned model and prompt) and the contamination check."""
 from __future__ import annotations
 
+import re
+
 from eval import metrics, pins
 
 
 def _verdict(raw: str) -> str:
-    tok = (raw or "").strip().upper().strip(".:*` ")
-    if tok.startswith("TIE"):
-        return "TIE"
-    return tok[:1] if tok[:1] in ("A", "B") else "INVALID"
+    """The judge prompt asks for exactly one token. Accept only A, B or TIE (case and
+    surrounding punctuation/markdown ignored); anything else ("Answer B", "Both",
+    "A and B are equal") is INVALID rather than guessed, so it can never flip a result."""
+    tok = (raw or "").strip().upper().strip(".:*`'\"!()[] \t\r\n")
+    m = re.fullmatch(r"(A|B|TIE)", tok)
+    return m.group(1) if m else "INVALID"
 
 
 def pairwise(llm, question: str, system_answer: str, baseline_answer: str) -> dict:

@@ -95,6 +95,9 @@ def build_full_index(cfg: Config, ds: Dataset, workdir: Path) -> Index:
 
 
 def _reload(path: Path):
+    # TODO(H3/F2): pickle. IndexStore.load uses pickle (hard rule 6). Tolerated only because
+    # the file was written moments earlier by this process into a private temp dir; drop
+    # this reload once the pipeline exposes chunks/faiss in memory (F2) or H3 lands.
     from rag_system.store.index_store import IndexStore
     return IndexStore(path).load()
 
@@ -108,7 +111,7 @@ class SpectRAG:
         self.expander = GraphExpander(cfg)
         self.diffuser = RelevanceDiffuser(cfg)
         self.selector = ClusterAwareSelector(cfg)
-        if encoder is not None:
+        if encoder is not None:  # TODO(F2): private attribute; replace with a public hook
             self.selector._enc = encoder
 
     def retrieve(self, question: str) -> Retrieval:

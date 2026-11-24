@@ -8,12 +8,17 @@ Owner: evaluator. Backlog: E0 (E0a = harness, E0b = paper reproduction).
 | --- | --- | --- | --- |
 | `python -m eval smoke` | bundled fixture `eval/fixtures/smoke/` | none (fake embedder, extractive generator, lexical fake judge) | anyone, CI |
 | `python -m eval run --dev [--datasets ...] [--limit N]` | `$SPECTRAG_DEV_DIR` (default `~/spectrag-data/eval-dev/`) | Claude Haiku `claude-haiku-5-5` | anyone may request; evaluator runs |
-| `python -m eval run --release` | `$SPECTRAG_TEST_DIR` (default `~/spectrag-private/eval-test/`), all six datasets required, no `--limit` | Claude Haiku `claude-haiku-5-5` | evaluator only |
+| `python -m eval run --release` | `$SPECTRAG_TEST_DIR` (default `~/spectrag-private/eval-test/`), all six datasets required, no `--limit`, no `--datasets` | Claude Haiku `claude-haiku-5-5` | evaluator only |
 
 `run` needs `SPECTRAG_ANTHROPIC_API_KEY`; the harness deliberately does **not** fall back to
 `ANTHROPIC_API_KEY`. Missing key, missing split directory or (for `--release`) a missing
-dataset exits with code 2 and a one-line message. Smoke exits 1 if an invariant fails
-(metric outside [0, 1], offline build not deterministic, any LLM call made).
+dataset exits with code 2 and a one-line message. Result files record `evaluated_datasets`,
+`skipped_datasets` (relative to all six) and `complete` (all six, no `--limit`).
+
+Smoke exits 1 if an invariant fails: a metric outside [0, 1], an offline build that is not
+deterministic, or any attempted LLM call. The whole smoke run executes under a meter that wraps
+the Anthropic SDK's `Messages.create`, counts every attempt and raises instead of sending it, so
+the result's `llm_calls_attempted` is measured, not assumed.
 
 Full runs also need Ollama (`nomic-embed-text`) for embeddings. Embeddings, utility questions
 and concepts are cached under `$SPECTRAG_EVAL_CACHE` (default `~/.cache/spectrag-eval/`).
@@ -35,10 +40,15 @@ and line only, never question or answer text.
 - **mrr**: reciprocal rank of the first evidence chunk.
 - **em / f1**: SQuAD-normalised, only on questions with gold answers.
 - **judge_win_rate_vs_naiverag**: pairwise judge, both answer orders, win 1 / tie or invalid 0.5 / loss 0.
-- **index cost**: Anthropic calls and input/output tokens during the first build (counted by wrapping
-  the SDK's `Messages.create` in-process; a second build hits warm caches).
+  The verdict must be exactly `A`, `B` or `TIE` (case and surrounding punctuation ignored); any
+  other reply is counted in `judge_invalid_verdicts`, never guessed.
+- **index cost**: Anthropic calls and input/output tokens during the **first build only** (counted by
+  wrapping the SDK's `Messages.create` in-process). The second build hits warm caches and is not
+  metered. Generator and judge tokens are **not** included in index cost and are not reported yet.
 - **build_time_s**, **peak_rss_mb** (process peak RSS), **query_p50_ms / query_p95_ms** (retrieval only, no generation).
-- **top10_stability**: mean top-10 overlap between two independent builds.
+- **top10_stability**: mean top-10 overlap between two builds. The second build reuses the warm
+  utility-question and concept caches, so this measures non-LLM nondeterminism (e.g. the
+  eigensolver), **not** variance of the index-time LLM.
 
 ## Contamination check
 
