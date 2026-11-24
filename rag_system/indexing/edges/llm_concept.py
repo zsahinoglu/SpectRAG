@@ -1,7 +1,7 @@
 """LLM concept extraction for the entity/concept edge signal.
 
 Instead of spaCy/GLiNER named entities (generic persons/orgs, weakly extracted),
-this asks an LLM (gpt-4o-mini) for the domain CONCEPTS a passage is about, as
+this asks an LLM (Claude Haiku by default) for the domain CONCEPTS a passage is about, as
 canonical short phrases. Two chunks that discuss the same concept in different
 words — which cosine similarity misses — then share a concept key and get linked.
 This is the cross-document signal genuinely ORTHOGONAL to the embedding space,
@@ -23,26 +23,38 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from openai import OpenAI
-
-from config import IndexingConfig, OpenAIConfig
+from config import AnthropicConfig, IndexingConfig, OpenAIConfig
 from prompts import CONCEPT_EXTRACTION_PROMPT
+from rag_system.llm import anthropic_complete, make_anthropic_client, parse_concepts_json
 
 logger = logging.getLogger(__name__)
 
 
 class LLMConceptExtractor:
-    def __init__(self, openai_cfg: OpenAIConfig, cfg: IndexingConfig) -> None:
-        if not openai_cfg.api_key:
-            raise ValueError(
-                "OPENAI_API_KEY is required for entity_extraction_mode='llm_concepts'."
+    def __init__(self, openai_cfg: OpenAIConfig | None, cfg: IndexingConfig,
+                 anthropic_cfg: AnthropicConfig | None = None,
+                 client=None) -> None:
+        """`client` lets tests inject a mocked LLM client for the chosen backend."""
+        self._backend = cfg.concept_llm_backend
+        if self._backend == "anthropic":
+            anthropic_cfg = anthropic_cfg or AnthropicConfig()
+            self._client = client or make_anthropic_client(
+                anthropic_cfg, "entity_extraction_mode='llm_concepts'")
+            self._model = anthropic_cfg.model
+        elif self._backend == "openai":
+            if openai_cfg is None or not openai_cfg.api_key:
+                raise ValueError(
+                    "OPENAI_API_KEY is required for concept_llm_backend='openai'."
+                )
+            from openai import OpenAI
+            self._client = client or OpenAI(
+                api_key=openai_cfg.api_key,
+                base_url=openai_cfg.base_url,
+                timeout=openai_cfg.request_timeout,
             )
-        self._client = OpenAI(
-            api_key=openai_cfg.api_key,
-            base_url=openai_cfg.base_url,
-            timeout=openai_cfg.request_timeout,
-        )
-        self._model = openai_cfg.model
+            self._model = openai_cfg.model
+        else:
+            raise ValueError(f"Unknown concept_llm_backend {self._backend!r}")
         self._max_chars = cfg.concept_max_text_chars
         self._max_tokens = cfg.concept_llm_max_tokens
         self._workers = max(1, cfg.llm_parallel_workers)
@@ -65,18 +77,21 @@ class LLMConceptExtractor:
         last_exc: Exception | None = None
         for attempt in range(self._max_retries):
             try:
-                resp = self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[{"role": "user",
-                               "content": CONCEPT_EXTRACTION_PROMPT.format(text=snippet)}],
-                    temperature=0.0,
-                    max_tokens=self._max_tokens,
-                    response_format={"type": "json_object"},
-                )
-                data = json.loads(resp.choices[0].message.content or "{}")
-                return sorted({
-                    str(c).strip().lower() for c in data.get("concepts", []) if str(c).strip()
-                })
+                prompt = CONCEPT_EXTRACTION_PROMPT.format(text=snippet)
+                if self._backend == "anthropic":
+                    raw = anthropic_complete(
+                        self._client, model=self._model, user=prompt,
+                        temperature=0.0, max_tokens=self._max_tokens)
+                else:
+                    resp = self._client.chat.completions.create(
+                        model=self._model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.0,
+                        max_tokens=self._max_tokens,
+                        response_format={"type": "json_object"},
+                    )
+                    raw = resp.choices[0].message.content or "{}"
+                return parse_concepts_json(raw)  # schema-validated; invalid → retry
             except Exception as exc:  # noqa: BLE001 — retry transient API/parse errors
                 last_exc = exc
                 if attempt < self._max_retries - 1:

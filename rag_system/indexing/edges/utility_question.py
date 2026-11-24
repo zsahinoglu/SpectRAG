@@ -14,8 +14,9 @@ from rag_system.models import Chunk
 from rag_system.indexing.edges.base import EdgeExtractor, RawEdge
 from rag_system.indexing.embedder import OllamaEmbedder
 from rag_system.language.detector import language_name
-from config import IndexingConfig, OllamaConfig, OpenAIConfig
+from config import AnthropicConfig, IndexingConfig, OllamaConfig, OpenAIConfig
 from prompts import UTILITY_QUESTION_PROMPT
+from rag_system.llm import anthropic_complete, make_anthropic_client
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,10 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
         ollama_cfg: OllamaConfig,
         embedder: OllamaEmbedder,
         openai_cfg: OpenAIConfig | None = None,
+        anthropic_cfg: AnthropicConfig | None = None,
+        client=None,
     ) -> None:
+        """`client` lets tests inject a mocked LLM client (anthropic/openai backends)."""
         self._n_questions    = cfg.utility_questions_per_chunk
         self._threshold      = cfg.utility_question_threshold
         self._search_k       = cfg.utility_question_search_k
@@ -43,15 +47,25 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
         self._ollama_cfg     = ollama_cfg
         self._embedder       = embedder
         self._backend        = cfg.utility_question_llm_backend
-        # OpenAI calls parallelize well; the local Ollama server is kept
+        # Hosted API calls parallelize well; the local Ollama server is kept
         # sequential (it serializes generations anyway).
-        self._workers        = max(1, cfg.llm_parallel_workers) if self._backend == "openai" else 1
+        self._workers        = (max(1, cfg.llm_parallel_workers)
+                                if self._backend in ("openai", "anthropic") else 1)
         self._max_retries    = max(1, cfg.llm_max_retries)
-        if self._backend == "openai":
+        self._anthropic = None
+        if self._backend == "anthropic":
+            anthropic_cfg = anthropic_cfg or AnthropicConfig()
+            self._anthropic = client or make_anthropic_client(
+                anthropic_cfg, "utility_question_llm_backend='anthropic'")
+            self._anthropic_model = anthropic_cfg.model
+            self._openai = None
+            self._client = None
+            model_tag = anthropic_cfg.model
+        elif self._backend == "openai":
             if openai_cfg is None or not openai_cfg.api_key:
                 raise ValueError("OPENAI_API_KEY required for utility_question_llm_backend='openai'.")
             from openai import OpenAI
-            self._openai = OpenAI(
+            self._openai = client or OpenAI(
                 api_key=openai_cfg.api_key, base_url=openai_cfg.base_url,
                 timeout=openai_cfg.request_timeout,
             )
@@ -169,7 +183,11 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
         last_exc: Exception | None = None
         for attempt in range(self._max_retries):
             try:
-                if self._openai is not None:
+                if self._anthropic is not None:
+                    raw = anthropic_complete(
+                        self._anthropic, model=self._anthropic_model, user=prompt,
+                        temperature=self._temperature, max_tokens=self._max_tokens)
+                elif self._openai is not None:
                     resp = self._openai.chat.completions.create(
                         model=self._openai_model,
                         messages=[{"role": "user", "content": prompt}],

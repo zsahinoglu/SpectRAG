@@ -90,9 +90,10 @@ class IndexingConfig:
 
     # Utility-question edges
     # Index-time LLM for utility-question generation:
-    #   "openai" — gpt-4o-mini (sharper, more specific questions → better UQ edges
-    #              AND better query-side seeds). "ollama" — local llama3.1:8b.
-    utility_question_llm_backend: str       = "openai"
+    #   "anthropic" — Claude Haiku (default; sharper, more specific questions →
+    #                 better UQ edges AND better query-side seeds).
+    #   "openai" — legacy gpt-4o-mini. "ollama" — local llama3.1:8b.
+    utility_question_llm_backend: str       = "anthropic"
     utility_questions_per_chunk: int        = 2      # LLM calls per chunk; richer graph + more query-side seeds
     utility_question_threshold: float       = 0.80   # cosine sim floor for UQ edges
     utility_question_search_k: int          = 20     # k-NN over question embeddings
@@ -114,6 +115,8 @@ class IndexingConfig:
     #                    the graph's reason to exist. One LLM call per chunk (cached
     #                    on disk, so re-indexing the same corpus is free).
     entity_extraction_mode: str = "llm_concepts"
+    # LLM used for "llm_concepts": "anthropic" (default, Claude Haiku) or "openai" (legacy).
+    concept_llm_backend: str    = "anthropic"
     concept_max_text_chars: int = 2000   # chars of chunk text sent to the LLM
     concept_llm_max_tokens: int = 200
     concept_cache_dir: str      = "./.concept_cache"
@@ -287,9 +290,25 @@ class OllamaConfig:
     embedding_cache_dir: str = "./.embedding_cache"
 
 
+def _anthropic_key() -> str:
+    """SPECTRAG_ANTHROPIC_API_KEY first, falling back to ANTHROPIC_API_KEY."""
+    return os.getenv("SPECTRAG_ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or ""
+
+
+@dataclass
+class AnthropicConfig:
+    """Hosted LLM for index-time concepts/utility questions and answer generation."""
+    api_key:         str        = field(default_factory=_anthropic_key)
+    base_url:        str | None = field(default_factory=lambda: os.getenv("ANTHROPIC_BASE_URL") or None)
+    model:           str        = "claude-haiku-5-5"   # pinned; part of cache filenames
+    temperature:     float      = 0.0    # 0 → reproducible generation across runs
+    max_tokens:      int        = 2048
+    request_timeout: int        = 120
+
+
 @dataclass
 class OpenAIConfig:
-    """Final-answer generator (Stage 5). Utility-question generation stays on Ollama."""
+    """Legacy OpenAI backend (opt-in via *_backend = "openai"); not used by default."""
     api_key:         str        = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
     base_url:        str | None = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL") or None)
     model:           str        = "gpt-4o-mini"
@@ -343,6 +362,9 @@ class Config:
     retrieval:    RetrievalConfig = field(default_factory=RetrievalConfig)
     ollama:       OllamaConfig   = field(default_factory=OllamaConfig)
     openai:       OpenAIConfig   = field(default_factory=OpenAIConfig)
+    anthropic:    AnthropicConfig = field(default_factory=AnthropicConfig)
+    # Final-answer generator backend: "anthropic" (default) or "openai" (legacy).
+    generation_backend: str      = "anthropic"
     ner:          NERConfig      = field(default_factory=NERConfig)
     neo4j:        Neo4jConfig    = field(default_factory=Neo4jConfig)
     server:       ServerConfig   = field(default_factory=ServerConfig)

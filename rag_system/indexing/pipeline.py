@@ -85,12 +85,14 @@ class IndexingPipeline:
 
         _report(f"Edges: entity (NER on {len(all_chunks)} chunks)")
         entity = EntityEdgeExtractor(
-            self.cfg.indexing, self.cfg.ner, self.cfg.language, self.cfg.ollama, self.cfg.openai
+            self.cfg.indexing, self.cfg.ner, self.cfg.language, self.cfg.ollama, self.cfg.openai,
+            self.cfg.anthropic,
         ).extract(all_chunks)
 
         _report(f"Edges: utility-questions ({len(all_chunks)} LLM calls)")
         uq = UtilityQuestionEdgeExtractor(
-            self.cfg.indexing, self.cfg.ollama, self.embedder, self.cfg.openai
+            self.cfg.indexing, self.cfg.ollama, self.embedder, self.cfg.openai,
+            self.cfg.anthropic,
         ).extract(all_chunks)
 
         _report("Edges: citation")
