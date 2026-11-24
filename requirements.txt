@@ -11,10 +11,13 @@ neo4j>=5.0
 # Ollama Python client (embeddings, utility-question generation)
 ollama>=0.2
 
-# OpenAI Python client (final-answer generator — Stage 5)
+# Anthropic Python client (default hosted LLM: Claude Haiku — concepts, questions, generation)
+anthropic>=0.40
+
+# Legacy OpenAI backend (opt-in only; not used by default)
 openai>=1.0
 
-# .env loading (OPENAI_API_KEY, etc.)
+# .env loading (SPECTRAG_ANTHROPIC_API_KEY, etc.)
 python-dotenv>=1.0
 
 # Document parsing

@@ -4,7 +4,8 @@ from collections import defaultdict
 from rag_system.models import Chunk
 from rag_system.indexing.edges.base import EdgeExtractor, RawEdge
 from rag_system.ner.extractor import HybridNERExtractor
-from config import IndexingConfig, LanguageConfig, NERConfig, OllamaConfig, OpenAIConfig
+from config import (AnthropicConfig, IndexingConfig, LanguageConfig, NERConfig,
+                    OllamaConfig, OpenAIConfig)
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,14 @@ class EntityEdgeExtractor(EdgeExtractor):
         lang_cfg: LanguageConfig | None = None,
         ollama_cfg: OllamaConfig | None = None,
         openai_cfg: OpenAIConfig | None = None,
+        anthropic_cfg: AnthropicConfig | None = None,
     ) -> None:
         self._min_freq     = cfg.entity_min_freq
         self._log_interval = cfg.entity_log_interval
         self._mode         = cfg.entity_extraction_mode
         if self._mode == "llm_concepts":
             from rag_system.indexing.edges.llm_concept import LLMConceptExtractor
-            self._concept = LLMConceptExtractor(openai_cfg, cfg)
+            self._concept = LLMConceptExtractor(openai_cfg, cfg, anthropic_cfg)
             self._ner = None
         else:
             self._ner = HybridNERExtractor(ner_cfg, lang_cfg, ollama_cfg)
