@@ -19,6 +19,24 @@ cmd = (data.get("tool_input") or {}).get("command") or ""
 cwd = data.get("cwd") or "."
 
 
+def strip_heredocs(text: str) -> str:
+    """Drop heredoc bodies: they are data on stdin (e.g. a review verdict), not commands."""
+    out, end = [], None
+    for line in text.split("\n"):
+        if end is not None:
+            if line.strip() == end:
+                end = None
+            continue
+        out.append(line)
+        m = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line)
+        if m:
+            end = m.group(2)
+    return "\n".join(out)
+
+
+cmd = strip_heredocs(cmd)
+
+
 def block(reason: str) -> None:
     print(f"Blocked by git guard: {reason}", file=sys.stderr)
     sys.exit(2)
