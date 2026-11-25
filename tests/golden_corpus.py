@@ -9,7 +9,7 @@ from rag_system.indexing.edges.section import SectionEdgeExtractor
 from rag_system.indexing.edges.semantic import SemanticEdgeExtractor
 from rag_system.indexing.graph_builder import GraphBuilder
 from rag_system.indexing.spectral import SpectralComputer
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.store.memory_graph import InMemoryGraphStore
 
 from tests.fakes import FakeEmbedder, WhitespaceEncoder

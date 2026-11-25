@@ -3,20 +3,18 @@ import hashlib
 import json
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import numpy as np
 import faiss
-import ollama
-from rag_system.models import Chunk
+from spectrag.models import Chunk
+from spectrag.llms import LLMUnavailableError, OllamaLLM
+from spectrag.protocols import Embedder, IndexLLM
 from rag_system.indexing.edges.base import EdgeExtractor, RawEdge
-from rag_system.indexing.embedder import OllamaEmbedder
+from rag_system.indexing.edges.llm_concept import cache_name
 from rag_system.language.detector import language_name
-from config import AnthropicConfig, IndexingConfig, OllamaConfig, OpenAIConfig
+from config import IndexingConfig
 from prompts import UTILITY_QUESTION_PROMPT
-from rag_system.llm import anthropic_complete, make_anthropic_client
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +23,12 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
     """
     Functional-similarity edges: the LLM generates questions per chunk; chunks
     that answer similar questions receive an edge.
+
+    `llm` is any `spectrag.IndexLLM` (transport retries are its job), `embedder`
+    any `spectrag.Embedder`. Pass `NoLLM` only if the caller skips this signal.
     """
 
-    def __init__(
-        self,
-        cfg: IndexingConfig,
-        ollama_cfg: OllamaConfig,
-        embedder: OllamaEmbedder,
-        openai_cfg: OpenAIConfig | None = None,
-        anthropic_cfg: AnthropicConfig | None = None,
-        client=None,
-    ) -> None:
-        """`client` lets tests inject a mocked LLM client (anthropic/openai backends)."""
+    def __init__(self, cfg: IndexingConfig, llm: IndexLLM, embedder: Embedder) -> None:
         self._n_questions    = cfg.utility_questions_per_chunk
         self._threshold      = cfg.utility_question_threshold
         self._search_k       = cfg.utility_question_search_k
@@ -44,47 +36,21 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
         self._temperature    = cfg.utility_question_llm_temperature
         self._max_tokens     = cfg.utility_question_llm_max_tokens
         self._log_interval   = cfg.utility_question_log_interval
-        self._ollama_cfg     = ollama_cfg
+        self._llm            = llm
         self._embedder       = embedder
-        self._backend        = cfg.utility_question_llm_backend
-        # Hosted API calls parallelize well; the local Ollama server is kept
+        # Hosted API calls parallelize well; a local Ollama server is kept
         # sequential (it serializes generations anyway).
-        self._workers        = (max(1, cfg.llm_parallel_workers)
-                                if self._backend in ("openai", "anthropic") else 1)
-        self._max_retries    = max(1, cfg.llm_max_retries)
-        self._anthropic = None
-        if self._backend == "anthropic":
-            anthropic_cfg = anthropic_cfg or AnthropicConfig()
-            self._anthropic = client or make_anthropic_client(
-                anthropic_cfg, "utility_question_llm_backend='anthropic'")
-            self._anthropic_model = anthropic_cfg.model
-            self._openai = None
-            self._client = None
-            model_tag = anthropic_cfg.model
-        elif self._backend == "openai":
-            if openai_cfg is None or not openai_cfg.api_key:
-                raise ValueError("OPENAI_API_KEY required for utility_question_llm_backend='openai'.")
-            from openai import OpenAI
-            self._openai = client or OpenAI(
-                api_key=openai_cfg.api_key, base_url=openai_cfg.base_url,
-                timeout=openai_cfg.request_timeout,
-            )
-            self._openai_model = openai_cfg.model
-            self._client = None
-            model_tag = openai_cfg.model
-        else:
-            self._openai = None
-            self._client = ollama.Client(host=ollama_cfg.base_url)
-            model_tag = ollama_cfg.llm_model
+        self._workers        = (1 if isinstance(llm, OllamaLLM)
+                                else max(1, cfg.llm_parallel_workers))
 
         # Content-hash disk cache of generated questions, keyed by chunk text (+
-        # language). The filename encodes backend/model/count so a config change
+        # language). The filename encodes model_id/count so a config change
         # never serves mismatched questions. Re-indexing after adding docs only
         # pays the LLM for genuinely new chunks; unchanged chunks are free.
         self._cache_dir = Path(cfg.utility_question_cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_file = self._cache_dir / (
-            f"{self._backend}_{model_tag.replace('/', '_')}_{self._n_questions}q.json"
+            f"{cache_name(llm.model_id)}_{self._n_questions}q.json"
         )
         self._cache: dict[str, list[str]] = {}
         if self._cache_file.exists():
@@ -96,9 +62,8 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
         self._cache_dirty = 0
 
     def extract(self, chunks: list[Chunk]) -> list[RawEdge]:
-        # Generate questions for each chunk — LLM calls in parallel (OpenAI
-        # backend), each with retry/backoff so transient API errors don't
-        # silently strip a chunk of its questions.
+        # Generate questions for each chunk — LLM calls in parallel (hosted
+        # backends); transient API errors are retried inside the IndexLLM.
         all_questions: list[list[str]] = [[] for _ in chunks]
         done = 0
         done_lock = threading.Lock()
@@ -180,44 +145,23 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
             language=language,
             text=snippet,
         )
-        last_exc: Exception | None = None
-        for attempt in range(self._max_retries):
-            try:
-                if self._anthropic is not None:
-                    raw = anthropic_complete(
-                        self._anthropic, model=self._anthropic_model, user=prompt,
-                        temperature=self._temperature, max_tokens=self._max_tokens)
-                elif self._openai is not None:
-                    resp = self._openai.chat.completions.create(
-                        model=self._openai_model,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=self._temperature,
-                        max_tokens=self._max_tokens,
-                    )
-                    raw = resp.choices[0].message.content or ""
-                else:
-                    resp = self._client.generate(
-                        model=self._ollama_cfg.llm_model,
-                        prompt=prompt,
-                        options={"temperature": self._temperature, "num_predict": self._max_tokens},
-                    )
-                    raw = resp.response
-                questions = self._parse_questions(raw, self._n_questions)
-                with self._cache_lock:
-                    self._cache[key] = questions
-                    self._cache_dirty += 1
-                    if self._cache_dirty >= 25:
-                        self._flush_cache_locked()
-                return questions
-            except Exception as exc:  # noqa: BLE001 — retry transient API errors
-                last_exc = exc
-                if attempt < self._max_retries - 1:
-                    time.sleep(2 ** attempt)  # 1s, 2s, …
-        # Failures are NOT cached — a transient error must not permanently strip a
-        # chunk of its questions (it retries on the next index run).
-        logger.warning("Question generation failed after %d attempts: %s",
-                       self._max_retries, last_exc)
-        return []
+        try:
+            raw = self._llm.complete(
+                prompt, temperature=self._temperature, max_tokens=self._max_tokens)
+        except LLMUnavailableError:
+            raise  # NoLLM must be handled by the caller, never turn into "no questions"
+        except Exception as exc:  # noqa: BLE001 — one bad chunk must not abort indexing
+            # Transport retries already happened inside the IndexLLM. Failures are NOT
+            # cached: the chunk is retried on the next index run.
+            logger.warning("Question generation failed: %s", exc)
+            return []
+        questions = self._parse_questions(raw, self._n_questions)
+        with self._cache_lock:
+            self._cache[key] = questions
+            self._cache_dirty += 1
+            if self._cache_dirty >= 25:
+                self._flush_cache_locked()
+        return questions
 
     def _flush_cache_locked(self) -> None:
         """Write the question cache to disk. Caller must hold self._cache_lock."""

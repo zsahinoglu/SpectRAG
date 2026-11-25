@@ -15,7 +15,7 @@ import tiktoken
 import faiss  # noqa: F401  (import-order guard, see above)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.language.detector import detect_language
 from config import IndexingConfig, LanguageConfig
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 import numpy as np
 from sklearn.cluster import KMeans
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from config import IndexingConfig
 
 logger = logging.getLogger(__name__)

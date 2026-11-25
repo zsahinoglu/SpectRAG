@@ -79,7 +79,6 @@ def test_settings_reexports_config_dataclasses():
         "Neo4jConfig",
         "NERConfig",
         "OllamaConfig",
-        "OpenAIConfig",
         "RetrievalConfig",
         "ServerConfig",
     ])

@@ -11,7 +11,6 @@ import json
 from types import SimpleNamespace
 from typing import Callable
 
-from config import AnthropicConfig
 from rag_system.indexing.cluster_assigner import SpectralClusterAssigner
 from rag_system.indexing.edges.adjacency import AdjacencyEdgeExtractor
 from rag_system.indexing.edges.citation import CitationEdgeExtractor
@@ -20,8 +19,9 @@ from rag_system.indexing.edges.section import SectionEdgeExtractor
 from rag_system.indexing.edges.semantic import SemanticEdgeExtractor
 from rag_system.indexing.graph_builder import GraphBuilder
 from rag_system.indexing.spectral import SpectralComputer
-from rag_system.models import Chunk
 from rag_system.store.memory_graph import InMemoryGraphStore
+from spectrag.llms import AnthropicLLM
+from spectrag.models import Chunk
 from tests.fakes import FakeEmbedder
 from tests.golden_corpus import _RAW, make_config
 
@@ -109,8 +109,6 @@ def build_poisoned_index(monkeypatch, tmp_path, *, linked: bool):
     ad), which is what a compliant model does with that text. Returns
     (cfg, embedder, chunks, faiss_index, store, graph).
     """
-    import rag_system.indexing.edges.llm_concept as llm_concept
-
     texts = [r[2] + (" [1]" if i in CITING_CHUNKS else "") for i, r in enumerate(_RAW)]
     poison_text = POISON_BODY + (POISON_INJECTION if linked else "")
 
@@ -124,8 +122,7 @@ def build_poisoned_index(monkeypatch, tmp_path, *, linked: bool):
                 return concepts_json(GOLDEN_CONCEPTS[i])
         return concepts_json([])
 
-    fake = ScriptedLLM(reply)
-    monkeypatch.setattr(llm_concept, "make_anthropic_client", lambda *a, **k: fake)
+    llm = AnthropicLLM(client=ScriptedLLM(reply))
 
     cfg = make_config()
     cfg.indexing.concept_cache_dir = str(tmp_path / "concepts")
@@ -152,8 +149,7 @@ def build_poisoned_index(monkeypatch, tmp_path, *, linked: bool):
     embedder.embed_chunks(chunks)
     faiss_index = embedder.build_faiss_index(chunks)
 
-    entity = EntityEdgeExtractor(cfg.indexing, cfg.ner,
-                                 anthropic_cfg=AnthropicConfig(api_key="test")).extract(chunks)
+    entity = EntityEdgeExtractor(cfg.indexing, cfg.ner, llm=llm).extract(chunks)
     graph = GraphBuilder(cfg).build(
         chunks,
         SemanticEdgeExtractor(cfg.indexing).extract(chunks),

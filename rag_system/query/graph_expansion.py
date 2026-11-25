@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from config import Config
 
 if TYPE_CHECKING:

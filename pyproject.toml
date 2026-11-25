@@ -34,7 +34,6 @@ dependencies = [
 neo4j = ["neo4j>=5.0"]
 gliner = ["gliner>=0.2"]                 # pulls in PyTorch
 anthropic = ["anthropic>=0.40"]          # also in the default install; kept so the extra name resolves
-openai = ["openai>=1.0"]
 ollama = ["ollama>=0.2"]
 rerank = ["sentence-transformers>=2.7"]  # pulls in PyTorch
 dev = [

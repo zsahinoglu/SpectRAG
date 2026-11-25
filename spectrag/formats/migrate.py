@@ -48,6 +48,8 @@ class _RestrictedUnpickler(pickle.Unpickler):
     def find_class(self, module: str, name: str):
         # Protocol >= 4 resolves dotted names by nested getattr; never allow them.
         if "." not in name and (module, name) in _ALLOWED:
+            if module == "rag_system.models":  # same class; skip the deprecated shim
+                module = "spectrag.models"
             return super().find_class(module, name)
         raise pickle.UnpicklingError(f"legacy file references forbidden global {module}.{name}")
 

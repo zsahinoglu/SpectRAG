@@ -4,8 +4,9 @@ from typing import TYPE_CHECKING
 
 import faiss
 
-from rag_system.models import Chunk, QueryResult
-from rag_system.indexing.embedder import OllamaEmbedder
+from spectrag.models import Chunk, QueryResult
+from spectrag.protocols import Embedder, IndexLLM
+from rag_system.components import build_embedder
 from rag_system.query.seed_retrieval import SeedRetriever
 from rag_system.query.graph_expansion import GraphExpander
 from rag_system.query.diffusion import RelevanceDiffuser
@@ -27,15 +28,19 @@ class QueryPipeline:
       Stage 3  RelevanceDiffuser     — spectral proximity re-scoring (eigenspace distance to seeds)
       Stage 4  ClusterAwareSelector  — greedy diverse selection
       Stage 5  Generator             — LLM answer
+
+    `embedder` must be the embedder the index was built with; `llm` answers the
+    question (`NoLLM` → retrieval only, empty answer). Both default to `cfg`.
     """
 
-    def __init__(self, cfg: Config) -> None:
-        self.embedder = OllamaEmbedder(cfg.ollama)
+    def __init__(self, cfg: Config, *, embedder: Embedder | None = None,
+                 llm: IndexLLM | None = None) -> None:
+        self.embedder = embedder if embedder is not None else build_embedder(cfg)
         self.seed_retriever = SeedRetriever(cfg, self.embedder)
         self.expander = GraphExpander(cfg)
         self.diffuser = RelevanceDiffuser(cfg)
         self.selector = ClusterAwareSelector(cfg)
-        self.generator = Generator(cfg)
+        self.generator = Generator(cfg, llm)
 
     def query(
         self,

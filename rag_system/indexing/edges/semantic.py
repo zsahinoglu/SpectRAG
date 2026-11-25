@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import faiss
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.indexing.edges.base import EdgeExtractor, RawEdge
 from config import IndexingConfig
 

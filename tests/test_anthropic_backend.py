@@ -11,7 +11,8 @@ from rag_system.generation.generator import Generator
 from rag_system.indexing.edges.llm_concept import LLMConceptExtractor
 from rag_system.indexing.edges.utility_question import UtilityQuestionEdgeExtractor
 from rag_system.llm import make_anthropic_client, parse_concepts_json
-from rag_system.models import Chunk
+from spectrag.llms import AnthropicLLM
+from spectrag.models import Chunk
 
 
 class FakeAnthropic:
@@ -73,45 +74,67 @@ def test_parse_concepts_schema():
             parse_concepts_json(bad)
 
 
-def test_concepts_cache_retry_and_no_failure_caching(icfg):
-    fake = FakeAnthropic([RuntimeError("429"), "not json", '{"concepts": ["Graph"]}'])
-    ex = LLMConceptExtractor(None, icfg, AnthropicConfig(api_key="k"), client=fake)
+def test_concepts_cache_revalidation_and_no_failure_caching(icfg):
+    # An invalid reply is asked again (ADR 0005: the caller retries validation failures).
+    fake = FakeAnthropic(["not json", '{"concepts": ["Graph"]}'])
+    ex = LLMConceptExtractor(AnthropicLLM(client=fake), icfg)
     assert ex.extract("some text") == ["graph"]
-    assert len(fake.calls) == 3                      # two retries then success
+    assert len(fake.calls) == 2
     assert fake.calls[0]["model"] == "claude-haiku-5-5"
     assert ex.extract("some text") == ["graph"]      # in-memory cache hit
-    assert len(fake.calls) == 3
+    assert len(fake.calls) == 2
     ex.close()
+    assert ex._cache_file.name == "anthropic_claude-haiku-5-5.json"
     # disk cache survives a new instance
     fake2 = FakeAnthropic([])
-    ex2 = LLMConceptExtractor(None, icfg, AnthropicConfig(api_key="k"), client=fake2)
+    ex2 = LLMConceptExtractor(AnthropicLLM(client=fake2), icfg)
     assert ex2.extract("some text") == ["graph"] and not fake2.calls
 
-    # persistent failure → [] and NOT cached
+    # persistently invalid → [] after llm_max_retries asks, NOT cached
     bad = FakeAnthropic(["x"] * icfg.llm_max_retries)
-    ex3 = LLMConceptExtractor(None, icfg, AnthropicConfig(api_key="k"), client=bad)
+    ex3 = LLMConceptExtractor(AnthropicLLM(client=bad), icfg)
     assert ex3.extract("other text") == []
+    assert len(bad.calls) == icfg.llm_max_retries
     assert "other text" not in str(ex3._cache)
+
+    # transport errors are retried inside the IndexLLM (SDK), not again here
+    down = FakeAnthropic([RuntimeError("529")])
+    assert LLMConceptExtractor(AnthropicLLM(client=down), icfg).extract("third") == []
+    assert len(down.calls) == 1
+
+
+def test_concepts_read_pre_arch2c_cache_file(icfg, tmp_path):
+    import hashlib
+    key = hashlib.sha256(b"old text").hexdigest()[:16]
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "claude-haiku-5-5.json").write_text(json.dumps({key: ["kept"]}))
+    fake = FakeAnthropic([])
+    assert LLMConceptExtractor(AnthropicLLM(client=fake), icfg).extract("old text") == ["kept"]
+    assert not fake.calls
 
 
 def test_utility_questions_anthropic(icfg):
-    fake = FakeAnthropic([RuntimeError("500"), "1. What is A?\n2. Why B?\n3. extra"])
-    uq = UtilityQuestionEdgeExtractor(
-        icfg, None, None, None, AnthropicConfig(api_key="k"), client=fake)
+    fake = FakeAnthropic(["1. What is A?\n2. Why B?\n3. extra"])
+    uq = UtilityQuestionEdgeExtractor(icfg, AnthropicLLM(client=fake), None)
     qs = uq._generate_questions("chunk text")
     assert qs == ["What is A?", "Why B?"][: icfg.utility_questions_per_chunk]
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 1
     assert uq._generate_questions("chunk text") == qs   # cache hit, no new call
-    assert len(fake.calls) == 2
-    assert "anthropic_claude-haiku-5-5" in uq._cache_file.name
+    assert len(fake.calls) == 1
+    # Same file name as before ARCH2c, so existing caches stay valid.
+    assert uq._cache_file.name == f"anthropic_claude-haiku-5-5_{icfg.utility_questions_per_chunk}q.json"
+
+    down = FakeAnthropic([RuntimeError("500"), "What is C?"])
+    uq2 = UtilityQuestionEdgeExtractor(icfg, AnthropicLLM(client=down), None)
+    assert uq2._generate_questions("other chunk") == []             # failure → no questions
+    assert uq2._generate_questions("other chunk") == ["What is C?"]  # ...and not cached
+    assert len(down.calls) == 2
 
 
-def test_generator_anthropic_no_openai_key(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+def test_generator_anthropic(monkeypatch):
     cfg = Config()
-    cfg.anthropic = AnthropicConfig(api_key="k")
     fake = FakeAnthropic(["  The answer.  "])
-    gen = Generator(cfg, client=fake)
+    gen = Generator(cfg, AnthropicLLM(client=fake))
     chunk = Chunk(chunk_id="c1", doc_id="d", text="Paris is the capital of France.",
                   position=0, section_path=[], references=[],
                   metadata={"source": "geo.txt"})

@@ -8,7 +8,7 @@ import faiss
 import numpy as np
 import pytest
 
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.store.index_store import IndexStore
 from rag_system.store.memory_graph import InMemoryGraphStore
 from spectrag.formats import IndexFormatError, read_manifest

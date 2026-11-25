@@ -19,7 +19,6 @@ from config import (
     Neo4jConfig,
     NERConfig,
     OllamaConfig,
-    OpenAIConfig,
     RetrievalConfig,
     ServerConfig,
 )
@@ -32,7 +31,6 @@ __all__ = [
     "Neo4jConfig",
     "NERConfig",
     "OllamaConfig",
-    "OpenAIConfig",
     "RetrievalConfig",
     "ServerConfig",
 ]

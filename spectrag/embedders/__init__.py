@@ -4,8 +4,8 @@
     SentenceTransformerEmbedder  in-process model          extra: spectrag[rerank]
 
 Importing this package does not import any backend; a missing extra fails when
-the embedder is constructed, with the `pip install` line to fix it. The OpenAI
-embedder is tracked separately (ARCH2d).
+the embedder is constructed, with the `pip install` line to fix it. There is no
+OpenAI embedder (ARCH2d dropped by human decision).
 """
 from __future__ import annotations
 
