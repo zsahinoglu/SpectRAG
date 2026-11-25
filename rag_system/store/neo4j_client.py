@@ -118,8 +118,8 @@ class Neo4jGraphClient:
 
         logger.info(
             "Neo4j: written %d nodes, %d edges",
-            nx_graph.number_of_nodes(),
-            nx_graph.number_of_edges(),
+            len(node_batch),
+            len(edge_batch),
         )
 
     # Query — Stage 2: BFS expansion

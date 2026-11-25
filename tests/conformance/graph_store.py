@@ -75,6 +75,22 @@ def check_graph_store(factory) -> None:
     assert store.bfs_expand(["a-0"], 1, 2) == {"a-0", "a-1"}
     assert store.bfs_expand(["a-0"], 2, 4) == {"a-0", "a-1", "h-0", "a-2"}
     assert store.bfs_expand(["a-0"], 1, 1) == {"a-0"}
+    # insertion order differs from ascending order: z-9 is linked before a-1
+    zc = _chunks(["a-0", "a-1", "z-9", "b-0", "b-1", "b-2"])
+    zg = nx.Graph()
+    zg.add_nodes_from(c.chunk_id for c in zc)
+    zg.add_edge("a-0", "z-9", weight=0.9)
+    zg.add_edge("a-0", "a-1", weight=0.1)
+    zg.add_edge("z-9", "b-2", weight=0.9)
+    zg.add_edge("a-1", "b-0", weight=0.9)
+    zg.add_edge("a-1", "b-1", weight=0.9)
+    store.write_graph(zc, zg)
+    assert store.bfs_expand(["a-0"], 1, 2) == {"a-0", "a-1"}
+    # two-node frontier {a-1, z-9}: b-0 < b-1 < b-2 regardless of frontier order
+    assert store.bfs_expand(["a-0"], 2, 4) == {"a-0", "a-1", "z-9", "b-0"}
+    assert store.bfs_expand(["a-0"], 2, 5) == {"a-0", "a-1", "z-9", "b-0", "b-1"}
+    store.write_graph(chunks, g)
+
     # seeds are never dropped, even when they exceed the cap
     assert store.bfs_expand(["a-0", "a-4", "z-0"], 2, 2) == {"a-0", "a-4", "z-0"}
 

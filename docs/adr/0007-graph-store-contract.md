@@ -1,6 +1,6 @@
 # ADR 0007: GraphStore behavioral contract
 
-- Status: accepted (H8)
+- Status: proposed (H8; awaiting architect acceptance)
 - Date: 2026-11-25
 
 ## Context
@@ -24,6 +24,11 @@ name chunks that were never written (kept as new nodes vs. dropped), and duplica
 Executable form: `tests/conformance/graph_store.py::check_graph_store(factory)`. Run against
 in-memory, file round-trip, and Neo4j (set `SPECTRAG_TEST_NEO4J_URI`; skipped otherwise). The
 golden-corpus parity test compares full pipeline output across stores.
+
+Notes: Cypher `ORDER BY` on strings compares UTF-16 code units while Python `sorted` compares
+code points, so they differ for non-BMP characters in chunk ids; ids are expected to be ASCII.
+The Neo4j test factory requires a dedicated database (`SPECTRAG_TEST_NEO4J_DATABASE`, must not
+be `neo4j`) because `write_graph` deletes every `Chunk` node; it empties that database first.
 
 ## Consequences
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 
+import networkx as nx
 import pytest
 
 from rag_system.store.memory_graph import InMemoryGraphStore
@@ -31,8 +32,13 @@ def _neo4j_config():
         pytest.skip("set SPECTRAG_TEST_NEO4J_URI (and _USER/_PASSWORD) to test against Neo4j")
     pytest.importorskip("neo4j")
     from config import Neo4jConfig
+    db = os.environ.get("SPECTRAG_TEST_NEO4J_DATABASE")
+    if not db or db == "neo4j":
+        pytest.skip("set SPECTRAG_TEST_NEO4J_DATABASE to a dedicated test database (not 'neo4j'); "
+                    "write_graph deletes all Chunk nodes")
     return Neo4jConfig(
         uri=uri,
+        database=db,
         user=os.environ.get("SPECTRAG_TEST_NEO4J_USER", "neo4j"),
         password=os.environ.get("SPECTRAG_TEST_NEO4J_PASSWORD", "password123"),
     )
@@ -42,6 +48,7 @@ def _neo4j_store():
     from rag_system.store.neo4j_client import Neo4jGraphClient
     store = Neo4jGraphClient(_neo4j_config())
     store.connect()
+    store.write_graph([], nx.Graph())  # start empty
     return store
 
 
