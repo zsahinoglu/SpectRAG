@@ -1,6 +1,7 @@
 """H3: round trips, integrity checks and the one-way legacy migration."""
 from __future__ import annotations
 
+import io
 import pickle
 
 import faiss
@@ -11,7 +12,7 @@ from rag_system.models import Chunk
 from rag_system.store.index_store import IndexStore
 from rag_system.store.memory_graph import InMemoryGraphStore
 from spectrag.formats import IndexFormatError, read_manifest
-from spectrag.formats.migrate import main as migrate_main, migrate
+from spectrag.formats.migrate import _RestrictedUnpickler, main as migrate_main, migrate
 
 
 def _chunks() -> list[Chunk]:
@@ -137,7 +138,18 @@ def test_migration_refuses_forbidden_globals_and_runs_no_payload(tmp_path):
     assert not (tmp_path / "idx" / "manifest.json").exists()
 
 
-def test_migration_refuses_dotted_names_in_allowed_modules(tmp_path):
+@pytest.mark.parametrize("mod,name", [
+    ("networkx.classes.graph", "nx.Graph"),         # dotted: resolved under a prefix rule
+    ("networkx.classes.graph", "deepcopy"),         # non-allowlisted attr of an allowed module
+    ("networkx.classes.reportviews", "nx.utils"),
+])
+def test_find_class_rejects_dotted_and_unlisted_names(mod, name):
+    u = _RestrictedUnpickler(io.BytesIO(b""))
+    with pytest.raises(pickle.UnpicklingError):
+        u.find_class(mod, name)
+
+
+def test_migration_refuses_dotted_names_in_allowed_modules(tmp_path, capsys):
     """A proto-4 STACK_GLOBAL with a dotted name must not reach os.system via getattr."""
     sentinel = tmp_path / "pwned"
 
@@ -152,6 +164,7 @@ def test_migration_refuses_dotted_names_in_allowed_modules(tmp_path):
     (d / "chunks.pkl").write_bytes(payload)
     faiss.write_index(_faiss(), str(d / "faiss.index"))
     assert migrate_main([str(d)]) == 1
+    assert "forbidden global" in capsys.readouterr().err   # rejected by find_class, not by accident
     assert not sentinel.exists()
     assert not (d / "manifest.json").exists()
 
