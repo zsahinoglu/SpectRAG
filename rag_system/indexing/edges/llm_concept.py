@@ -89,7 +89,8 @@ class LLMConceptExtractor:
         key = hashlib.sha256(snippet.encode("utf-8")).hexdigest()[:16]
         with self._lock:
             if key in self._cache:
-                return self._cache[key]
+                # Entries written before H7 were never validated; re-clean on read.
+                return clean_concepts(self._cache[key])
 
         try:
             concepts = self._call_llm(snippet)

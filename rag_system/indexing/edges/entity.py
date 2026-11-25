@@ -69,14 +69,15 @@ class EntityEdgeExtractor(EdgeExtractor):
                 progress_every=self._log_interval,
             )
             for i, terms in enumerate(per_chunk):
-                for term in terms:
+                for term in set(terms):
                     entity_to_chunks[term].append(i)
             self._concept.close()
         else:
             for i, chunk in enumerate(chunks):
                 if (i + 1) % self._log_interval == 0:
                     logger.info("Concept/entity extraction: %d / %d chunks", i + 1, len(chunks))
-                for term in self._terms(chunk):
+                # distinct terms: NER can return one term under several labels
+                for term in set(self._terms(chunk)):
                     entity_to_chunks[term].append(i)
 
         # A term shared by a large share of the corpus ("machine learning") is a

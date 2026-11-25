@@ -23,7 +23,8 @@ def _server(tmp_path, token="s3cret-token"):
 ROUTES = [("GET", "/api/status"), ("GET", "/api/sessions"), ("POST", "/api/sessions"),
           ("GET", "/api/sessions/x"), ("DELETE", "/api/sessions/x"),
           ("GET", "/api/sessions/x/messages"), ("GET", "/api/sessions/x/graph"),
-          ("POST", "/api/sessions/x/query")]
+          ("POST", "/api/sessions/x/query"), ("PATCH", "/api/sessions/x"),
+          ("POST", "/api/sessions/x/index")]
 
 
 @pytest.mark.parametrize("method,path", ROUTES)

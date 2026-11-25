@@ -133,7 +133,9 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
         key = hashlib.sha256(f"{language}|{snippet}".encode("utf-8")).hexdigest()[:16]
         with self._cache_lock:
             if key in self._cache:
-                return list(self._cache[key])
+                # Entries written before H7 were never validated; re-clean on read.
+                return clean_questions("\n".join(map(str, self._cache[key])),
+                                       self._n_questions)
 
         prompt = UTILITY_QUESTION_PROMPT.format(
             n=self._n_questions,
