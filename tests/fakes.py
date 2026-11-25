@@ -17,11 +17,14 @@ class FakeEmbedder:
     the count vector is L2-normalised. Texts sharing vocabulary get high cosine
     similarity, so topical structure in a test corpus is preserved. Mirrors the
     ``OllamaEmbedder`` surface used by the pipeline (``embed``, ``embed_chunks``,
-    ``build_faiss_index``). ``kind`` is accepted and ignored.
+    ``build_faiss_index``) and conforms to ``spectrag.Embedder``. ``kind`` is
+    validated and otherwise ignored.
     """
 
     def __init__(self, dim: int = 64) -> None:
         self.dim = dim
+        self.model_id = f"fake:hashed-bow-{dim}"
+        self.dimension = dim
 
     def _vec(self, text: str) -> np.ndarray:
         v = np.zeros(self.dim, dtype=np.float64)
@@ -33,6 +36,10 @@ class FakeEmbedder:
         return (v / n if n > 0 else v).astype(np.float32)
 
     def embed(self, texts: list[str], kind: str = "document") -> np.ndarray:
+        if isinstance(texts, (str, bytes)):
+            raise TypeError("embed() takes a sequence of strings")
+        if kind not in ("document", "query"):
+            raise ValueError(f"bad kind {kind!r}")
         if not texts:
             return np.empty((0, self.dim), dtype=np.float32)
         return np.stack([self._vec(t) for t in texts])
