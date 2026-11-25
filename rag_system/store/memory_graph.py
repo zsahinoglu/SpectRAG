@@ -9,16 +9,17 @@ store through the same duck-typed surface —
     get_top_nodes_by_degree / get_edges_for_nodes / *_count  (viz + stats)
 
 so nothing in IndexingPipeline / QueryPipeline / the server routes changes. The
-whole graph lives in one NetworkX object that saves/loads as a single pickle, so
-each chat session can own its own graph on disk (sessions/<id>/graph.pkl) and
-restore it on demand — no Neo4j/Docker required.
+whole graph lives in one NetworkX object that saves/loads as a Parquet directory
+(spectrag.formats), so each chat session can own its own graph on disk
+(sessions/<id>/graph/) and restore it on demand — no Neo4j/Docker required.
 """
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
 
 import networkx as nx
+
+from spectrag.formats import IndexFormatError, read_graph, write_graph
 
 _SIGNALS = ["semantic", "adjacency", "section", "entity", "utility_question", "citation"]
 
@@ -144,18 +145,19 @@ class InMemoryGraphStore:
     # Persistence
 
     def save(self, path: Path | str) -> None:
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "wb") as fh:
-            pickle.dump(self._graph, fh, protocol=5)
+        """Write the graph as a directory (nodes/edges Parquet + manifest)."""
+        write_graph(path, self._graph)
 
     def load(self, path: Path | str) -> bool:
-        """Load a graph from disk. Returns False (leaving an empty graph) if the
-        file does not exist, so a fresh session degrades gracefully."""
+        """Load a graph directory. Returns False (leaving an empty graph) if nothing
+        exists there, so a fresh session degrades gracefully. A legacy pickle file at
+        ``path`` is refused (IndexFormatError), never read; migrate it first."""
         p = Path(path)
+        self._graph = nx.Graph()
         if not p.exists():
-            self._graph = nx.Graph()
             return False
-        with open(p, "rb") as fh:
-            self._graph = pickle.load(fh)
+        if not p.is_dir():
+            raise IndexFormatError(
+                f"{p} is a legacy graph file; run `python -m spectrag.formats.migrate`")
+        self._graph = read_graph(p)
         return True

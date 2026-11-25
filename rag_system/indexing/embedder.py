@@ -1,7 +1,6 @@
 from __future__ import annotations
 import hashlib
 import logging
-import pickle
 from pathlib import Path
 
 import numpy as np
@@ -30,12 +29,17 @@ class _EmbeddingCache:
         self._dir = Path(cache_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         # Model in the filename so switching embedders never serves stale vectors.
-        self._file = self._dir / f"{model.replace('/', '_')}.pkl"
+        # Plain-array .npz (keys + vectors), read with allow_pickle=False. Legacy
+        # `<model>.pkl` caches are ignored, never loaded: they are just cache misses.
+        self._file = self._dir / f"{model.replace('/', '_')}.npz"
         self._cache: dict[str, np.ndarray] = {}
         if self._file.exists():
             try:
-                with open(self._file, "rb") as fh:
-                    self._cache = pickle.load(fh)
+                with np.load(self._file, allow_pickle=False) as npz:
+                    keys, vecs = npz["keys"], npz["vectors"]
+                if vecs.ndim != 2 or len(keys) != len(vecs):
+                    raise ValueError("misaligned embedding cache")
+                self._cache = {str(k): v for k, v in zip(keys, vecs)}
             except Exception:  # noqa: BLE001 — a corrupt cache must not abort indexing
                 self._cache = {}
         self._dirty = False
@@ -54,9 +58,12 @@ class _EmbeddingCache:
         if not self._dirty:
             return
         try:
-            tmp = self._file.with_suffix(".pkl.tmp")
+            tmp = self._file.with_name(self._file.name + ".tmp")
+            keys = list(self._cache)
+            vecs = (np.stack([self._cache[k] for k in keys]).astype(np.float32)
+                    if keys else np.empty((0, 0), dtype=np.float32))
             with open(tmp, "wb") as fh:
-                pickle.dump(self._cache, fh, protocol=5)
+                np.savez(fh, keys=np.array(keys, dtype=str), vectors=vecs)
             tmp.replace(self._file)
             self._dirty = False
         except OSError:
