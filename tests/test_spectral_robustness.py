@@ -78,6 +78,7 @@ def test_arpack_retries_then_succeeds(monkeypatch):
     monkeypatch.setattr(spectral_mod.spla, "eigsh", flaky)
     res = _computer().compute(_graph(12, 0), _chunks(12))
     assert len(calls) == 3 and np.isfinite(res).all()
+    assert "maxiter" in calls[2] and "ncv" in calls[2]
 
 
 def test_arpack_raises_after_retries(monkeypatch):
@@ -90,7 +91,7 @@ def test_arpack_raises_after_retries(monkeypatch):
     monkeypatch.setattr(spectral_mod.spla, "eigsh", never)
     with pytest.raises(SpectralConvergenceError):
         _computer().compute(_graph(12, 0), _chunks(12))
-    assert len(calls) > 1
+    assert len(calls) == 3
 
 
 def test_diagnostics_written_to_manifest(tmp_path):
@@ -100,3 +101,35 @@ def test_diagnostics_written_to_manifest(tmp_path):
     write_chunks(tmp_path, chunks, spectral=sc.diagnostics)
     m = read_manifest(tmp_path)
     assert m["spectral"]["residual_norms"] == sc.diagnostics["residual_norms"]
+
+
+def test_diagnostics_do_not_carry_over_between_runs():
+    sc = _computer()
+    sc.compute(_graph(12, 0), _chunks(12))
+    assert sc.diagnostics["solver"] == "arpack"
+    G = nx.Graph()
+    G.add_edge("c0", "c1", weight=1.0)
+    sc.compute(G, _chunks(2))
+    d = sc.diagnostics
+    assert d["solver"] == "position_fallback"
+    assert d["residual_norms"] == [] and d["max_residual_norm"] is None
+    assert d["eigenvalues"] == []
+
+
+def test_self_loop_only_chunk_is_isolated():
+    G = _graph(12, 1)
+    G.add_edge("c12", "c12", weight=1.0)
+    sc = _computer()
+    res = sc.compute(G, _chunks(13))
+    assert np.all(res[12] == 0.0) and sc.diagnostics["n_isolated"] == 1
+
+
+def test_multiplex_zero_coords_for_isolated():
+    from rag_system.indexing.edges.base import RawEdge
+    from config import EdgeWeights
+    edges = [RawEdge(i, j, 1.0) for i in range(10) for j in range(i + 1, 10)]
+    sc = _computer()
+    res = sc.compute_multiplex({"semantic": edges}, EdgeWeights(), _chunks(12))
+    assert np.all(res[10:] == 0.0)
+    assert np.any(res[:10] != 0.0, axis=1).all()
+    assert sc.diagnostics["n_isolated"] == 2

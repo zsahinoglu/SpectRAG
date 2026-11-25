@@ -46,6 +46,7 @@ class SpectralComputer:
 
     def compute(self, G: nx.Graph, chunks: list[Chunk]) -> np.ndarray:
         """Assigns spectral_coords in-place to each chunk. Returns (n, k) float32."""
+        self.diagnostics = {}
         n = len(chunks)
         chunk_id_to_idx = {c.chunk_id: i for i, c in enumerate(chunks)}
         nodes = list(G.nodes())
@@ -73,7 +74,10 @@ class SpectralComputer:
         # Isolated chunks (no edges, or absent from the graph) get zero spectral
         # credit: all-zero coords, never interpolated from their position.
         connected = np.zeros(n, dtype=bool)
-        deg = A.getnnz(axis=1)
+        # A node with only a self-loop is isolated: the diagonal is excluded.
+        off = (A - sp.diags(A.diagonal())).tocsr()
+        off.eliminate_zeros()
+        deg = off.getnnz(axis=1)
         for graph_idx, node_id in enumerate(nodes):
             chunk_idx = chunk_id_to_idx.get(node_id)
             if chunk_idx is not None and deg[graph_idx] > 0:
@@ -103,6 +107,7 @@ class SpectralComputer:
         Edges use chunk indices directly (RawEdge.i/j index into `chunks`), so no
         node-id remapping is needed. Assigns spectral_coords in-place.
         """
+        self.diagnostics = {}
         n = len(chunks)
         L_multi: sp.spmatrix | None = None
         connected = np.zeros(n, dtype=bool)
@@ -152,6 +157,10 @@ class SpectralComputer:
         # diffusion still work on tiny corpora.
         if k_req < 2:
             logger.info("Spectral: graph too small (n=%d) — using 1-D position fallback", n)
+            self.diagnostics.update(
+                solver="position_fallback", eigenvalues=[],
+                residual_norms=[], max_residual_norm=None,
+            )
             return np.linspace(0.1, 1.0, num=n, dtype=np.float32).reshape(-1, 1)
         logger.info(
             "Spectral: computing %d eigenvectors of %dx%d Laplacian", k_req, n, n
