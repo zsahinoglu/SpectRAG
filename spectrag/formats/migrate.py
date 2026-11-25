@@ -35,12 +35,19 @@ _ALLOWED = {
     ("numpy.core.numeric", "_frombuffer"), ("numpy._core.numeric", "_frombuffer"),
     ("collections", "OrderedDict"), ("builtins", "set"), ("builtins", "frozenset"),
 }
-_ALLOWED_PREFIXES = ("networkx.classes.",)       # graph/view containers only
+# Exact NetworkX classes a legacy graph pickle can contain: the Graph itself plus the
+# views that ``cached_property`` leaves in its ``__dict__``. No prefix rules.
+_ALLOWED |= {("networkx.classes.graph", "Graph")} | {
+    ("networkx.classes.reportviews", n)
+    for n in ("NodeView", "EdgeView", "DegreeView", "NodeDataView", "EdgeDataView",
+              "OutEdgeView", "OutEdgeDataView")}
+_ALLOWED |= {("networkx.classes.coreviews", n) for n in ("AdjacencyView", "AtlasView")}
 
 
 class _RestrictedUnpickler(pickle.Unpickler):
     def find_class(self, module: str, name: str):
-        if (module, name) in _ALLOWED or module.startswith(_ALLOWED_PREFIXES):
+        # Protocol >= 4 resolves dotted names by nested getattr; never allow them.
+        if "." not in name and (module, name) in _ALLOWED:
             return super().find_class(module, name)
         raise pickle.UnpicklingError(f"legacy file references forbidden global {module}.{name}")
 

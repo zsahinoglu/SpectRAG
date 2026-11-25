@@ -137,6 +137,25 @@ def test_migration_refuses_forbidden_globals_and_runs_no_payload(tmp_path):
     assert not (tmp_path / "idx" / "manifest.json").exists()
 
 
+def test_migration_refuses_dotted_names_in_allowed_modules(tmp_path):
+    """A proto-4 STACK_GLOBAL with a dotted name must not reach os.system via getattr."""
+    sentinel = tmp_path / "pwned"
+
+    def short(b: bytes) -> bytes:
+        return b"\x8c" + bytes([len(b)]) + b                      # SHORT_BINUNICODE
+
+    cmd = f"touch {sentinel}".encode()
+    payload = (b"\x80\x04" + short(b"networkx.classes.graph") + short(b"nx.os.system")
+               + b"\x93" + short(cmd) + b"\x85R.")                 # STACK_GLOBAL, (cmd,), REDUCE
+    d = tmp_path / "idx"
+    d.mkdir()
+    (d / "chunks.pkl").write_bytes(payload)
+    faiss.write_index(_faiss(), str(d / "faiss.index"))
+    assert migrate_main([str(d)]) == 1
+    assert not sentinel.exists()
+    assert not (d / "manifest.json").exists()
+
+
 def test_embedding_cache_round_trip_and_legacy_ignored(tmp_path):
     from rag_system.indexing.embedder import _EmbeddingCache
     (tmp_path / "m.pkl").write_bytes(b"not loaded")

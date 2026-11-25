@@ -182,6 +182,7 @@ def write_graph(directory: Path | str, graph: nx.Graph) -> dict:
     """Persist a chunk graph: nodes (id, doc_id, position) and edges (known signals)."""
     d = Path(directory)
     d.mkdir(parents=True, exist_ok=True)
+    (d / MANIFEST_FILE).unlink(missing_ok=True)   # a crash mid-write must read as "no graph"
     nodes = list(graph.nodes(data=True))
     pq.write_table(pa.table({
         "id": pa.array([str(n) for n, _ in nodes], pa.string()),
