@@ -26,6 +26,7 @@ from pathlib import Path
 
 from config import IndexingConfig
 from prompts import CONCEPT_EXTRACTION_PROMPT
+from rag_system.untrusted import clean_concepts, fence
 from spectrag.llms import LLMUnavailableError
 from spectrag.protocols import IndexLLM
 
@@ -70,7 +71,7 @@ class LLMConceptExtractor:
 
     def _call_llm(self, snippet: str) -> list[str]:
         """One extraction; an invalid reply is re-asked. Raises after the final attempt."""
-        prompt = CONCEPT_EXTRACTION_PROMPT.format(text=snippet)
+        prompt = CONCEPT_EXTRACTION_PROMPT.format(text=fence(snippet))
         last_exc: Exception | None = None
         for _ in range(self._max_retries):
             try:
@@ -79,7 +80,7 @@ class LLMConceptExtractor:
             except ValueError as exc:  # reply failed parsing/validation → ask again
                 last_exc = exc
                 continue
-            return sorted({c.strip().lower() for c in data["concepts"] if c.strip()})
+            return clean_concepts(data["concepts"])
         raise last_exc  # type: ignore[misc]
 
     def extract(self, text: str) -> list[str]:

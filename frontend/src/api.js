@@ -1,7 +1,27 @@
 const BASE = '/api';
 
-async function request(path, options = {}) {
-  const res = await fetch(BASE + path, options);
+// The server requires a bearer token (SPECTRAG_SERVER_TOKEN, or the one it logs at
+// startup). It is asked for once and kept in localStorage; a 401 asks again.
+const TOKEN_KEY = 'spectrag_token';
+
+function authHeaders(force = false) {
+  let token = force ? null : localStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    token = window.prompt('SpectRAG API token (printed in the server log):') || '';
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function request(path, options = {}, retried = false) {
+  const res = await fetch(BASE + path, {
+    ...options,
+    headers: { ...(options.headers || {}), ...authHeaders(retried) },
+  });
+  if (res.status === 401 && !retried) {
+    localStorage.removeItem(TOKEN_KEY);
+    return request(path, options, true);
+  }
   let data;
   try {
     data = await res.json();

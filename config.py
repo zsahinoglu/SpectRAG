@@ -334,8 +334,12 @@ class Neo4jConfig:
 
 @dataclass
 class ServerConfig:
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"   # localhost only; expose deliberately (and keep the token on)
     port: int = 8000
+    # Bearer token required on every /api route. None → the SPECTRAG_SERVER_TOKEN
+    # environment variable, else a random token generated (and logged) at startup.
+    # There is no default token and no password.
+    api_token: str | None = None
     cors_origins: list[str] = field(default_factory=lambda: [
         "http://localhost:5173",
         "http://localhost:3000",

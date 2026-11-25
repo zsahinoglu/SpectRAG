@@ -10,8 +10,7 @@ and then rides graph expansion + diffusion into the context of unrelated queries
 Separately, a *benign* concept that occurs in most chunks (a hub) turns the
 entity signal into a near-complete graph, washing out the spectral structure.
 
-Tests marked ``H7`` fail today (strict xfail). H7 makes them pass and removes the
-marker; an unmarked test here is a control that must keep passing.
+H7 made these pass (the strict-xfail markers are gone); keep them passing.
 """
 from __future__ import annotations
 
@@ -27,9 +26,6 @@ from tests.test_golden_retrieval import _pipeline
 from tests.security._fixtures import (
     POISON_ID, ScriptedLLM, build_poisoned_index, chunk, concepts_json,
 )
-
-H7 = pytest.mark.xfail(strict=True, reason="R1/A13 open: H7 (untrusted-content defenses) "
-                                           "must make this pass, then drop this marker")
 
 
 def _selected(monkeypatch, tmp_path, linked: bool) -> dict[str, list[str]]:
@@ -48,7 +44,6 @@ def test_control_unlinked_ad_stays_out_of_context(monkeypatch, tmp_path):
         assert POISON_ID not in ids, q
 
 
-@H7
 def test_poisoned_hub_document_does_not_enter_unrelated_contexts(monkeypatch, tmp_path):
     hits = sorted(q for q, ids in _selected(monkeypatch, tmp_path, linked=True).items()
                   if POISON_ID in ids)
@@ -58,7 +53,6 @@ def test_poisoned_hub_document_does_not_enter_unrelated_contexts(monkeypatch, tm
     )
 
 
-@H7
 def test_injected_document_cannot_buy_edges_to_most_of_the_corpus(monkeypatch, tmp_path):
     """Graph-level view of the same attack: one chunk must not become adjacent to
     a majority of the corpus because its text asked for it."""
@@ -68,7 +62,6 @@ def test_injected_document_cannot_buy_edges_to_most_of_the_corpus(monkeypatch, t
     assert deg <= others // 2, f"{POISON_ID} has degree {deg}/{others}"
 
 
-@H7
 def test_bare_numeric_citations_do_not_link_different_documents():
     """"[1]" in document A and "[1]" in document B are different references.
     Keying them globally as ``ref:1`` links every document that uses numeric
@@ -107,7 +100,6 @@ def _hub_graph(monkeypatch, tmp_path, concepts_for: dict[int, list[str]]):
     return GraphBuilder(cfg).build(chunks, [], [], [], entity, [], [])
 
 
-@H7
 def test_hub_concept_does_not_make_a_clique(monkeypatch, tmp_path):
     """Every chunk of a domain corpus mentions "machine learning". That shared
     term carries no information, but today it creates C(40,2) = 780 edges at the

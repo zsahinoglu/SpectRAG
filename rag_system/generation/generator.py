@@ -6,6 +6,7 @@ from spectrag.protocols import IndexLLM
 from rag_system.components import build_llm, generation_sampling
 from rag_system.language.detector import detect_language, language_name
 from config import Config
+from rag_system.untrusted import fence
 from prompts import GENERATION_SYSTEM, GENERATION_CONTEXT_BLOCK
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ class Generator:
             for chunk in group_chunks:
                 n += 1
                 blocks.append(GENERATION_CONTEXT_BLOCK.format(
-                    i=n, source=src, pos=chunk.position, text=chunk.text,
+                    i=n, source=src, pos=chunk.position, text=fence(chunk.text),
                 ))
         context_text = "\n".join(blocks)
 

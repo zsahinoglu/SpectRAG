@@ -18,7 +18,9 @@ class CitationEdgeExtractor(EdgeExtractor):
     def extract(self, chunks: list[Chunk]) -> list[RawEdge]:
         key_to_chunks: dict[str, list[int]] = defaultdict(list)
         for i, chunk in enumerate(chunks):
-            for key in self._citation_keys(chunk.text):
+            # A bare "[1]" only means something inside its own document, so numeric
+            # keys are scoped to doc_id; DOIs and URLs are global identifiers.
+            for key in self._citation_keys(chunk.text, scope=chunk.doc_id):
                 key_to_chunks[key].append(i)
 
         edge_counts: dict[tuple[int, int], float] = {}
@@ -37,11 +39,11 @@ class CitationEdgeExtractor(EdgeExtractor):
         return [RawEdge(i, j, count / max_count) for (i, j), count in edge_counts.items()]
 
     @staticmethod
-    def _citation_keys(text: str) -> set[str]:
+    def _citation_keys(text: str, scope: str = "") -> set[str]:
         keys: set[str] = set()
         for m in _CITE_BRACKET_RE.finditer(text):
             for num in re.split(r"[,;]\s*", m.group(1)):
-                keys.add(f"ref:{num.strip()}")
+                keys.add(f"ref:{scope}:{num.strip()}")
         for m in _DOI_RE.finditer(text):
             keys.add(f"doi:{m.group(1).lower()}")
         for url in _URL_RE.findall(text):

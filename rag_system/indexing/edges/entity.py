@@ -10,6 +10,10 @@ from config import IndexingConfig, LanguageConfig, NERConfig, OllamaConfig
 
 logger = logging.getLogger(__name__)
 
+#: A term in more than max(HUB_MIN_CHUNKS, HUB_MAX_FRACTION * n_chunks) chunks makes no edges.
+HUB_MAX_FRACTION = 0.25
+HUB_MIN_CHUNKS = 5
+
 
 class EntityEdgeExtractor(EdgeExtractor):
     """Cross-chunk edges via shared entities/concepts (the primary multi-hop link).
@@ -75,9 +79,16 @@ class EntityEdgeExtractor(EdgeExtractor):
                 for term in self._terms(chunk):
                     entity_to_chunks[term].append(i)
 
+        # A term shared by a large share of the corpus ("machine learning") is a
+        # hub: it would add C(n,2) edges and carries no information. Skip it.
+        max_df = max(HUB_MIN_CHUNKS, int(HUB_MAX_FRACTION * len(chunks)))
         edge_counts: dict[tuple[int, int], float] = {}
-        for chunk_idxs in entity_to_chunks.values():
+        for term, chunk_idxs in entity_to_chunks.items():
             if len(chunk_idxs) < self._min_freq:
+                continue
+            if len(chunk_idxs) > max_df:
+                logger.info("Skipping hub term %r (in %d of %d chunks)",
+                            term, len(chunk_idxs), len(chunks))
                 continue
             for a in range(len(chunk_idxs)):
                 for b in range(a + 1, len(chunk_idxs)):
@@ -87,5 +98,15 @@ class EntityEdgeExtractor(EdgeExtractor):
         if not edge_counts:
             return []
 
-        max_count = max(edge_counts.values())
-        return [RawEdge(i, j, count / max_count) for (i, j), count in edge_counts.items()]
+        # Jaccard similarity of the two chunks' term sets instead of a raw count: a
+        # chunk that lists many terms (a steered extractor, or a boilerplate page)
+        # shares only a small fraction of its terms with any one neighbour, so it
+        # cannot buy strong links to everything by listing everything.
+        n_terms = [0] * len(chunks)
+        for chunk_idxs in entity_to_chunks.values():
+            for i in chunk_idxs:
+                n_terms[i] += 1
+        scored = {(i, j): c / (n_terms[i] + n_terms[j] - c)
+                  for (i, j), c in edge_counts.items()}
+        max_score = max(scored.values())
+        return [RawEdge(i, j, s / max_score) for (i, j), s in scored.items()]

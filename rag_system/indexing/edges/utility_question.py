@@ -15,6 +15,7 @@ from rag_system.indexing.edges.llm_concept import cache_name
 from rag_system.language.detector import language_name
 from config import IndexingConfig
 from prompts import UTILITY_QUESTION_PROMPT
+from rag_system.untrusted import clean_questions, fence
 
 logger = logging.getLogger(__name__)
 
@@ -122,14 +123,8 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
 
     @staticmethod
     def _parse_questions(raw: str, n: int) -> list[str]:
-        """Split model output into questions, stripping list numbering/bullets."""
-        import re
-        out: list[str] = []
-        for ln in raw.strip().splitlines():
-            ln = re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", ln.strip())
-            if ln:
-                out.append(ln)
-        return out[:n]
+        """Questions from model output (list markers stripped, non-questions dropped)."""
+        return clean_questions(raw, n)
 
     def _generate_questions(self, text: str, language: str = "English") -> list[str]:
         snippet = text[: self._max_text_chars]
@@ -143,7 +138,7 @@ class UtilityQuestionEdgeExtractor(EdgeExtractor):
         prompt = UTILITY_QUESTION_PROMPT.format(
             n=self._n_questions,
             language=language,
-            text=snippet,
+            text=fence(snippet),
         )
         try:
             raw = self._llm.complete(

@@ -7,13 +7,16 @@ methods. Import ``app`` (or run ``python server.py``) to serve it.
 """
 from __future__ import annotations
 
+import hmac
 import logging
+import os
+import secrets
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import Config
@@ -43,6 +46,9 @@ class SpectRAGServer:
 
     def __init__(self, cfg: Config | None = None) -> None:
         self.cfg = cfg or Config()
+        token = self.cfg.server.api_token or os.environ.get("SPECTRAG_SERVER_TOKEN")
+        self._token_generated = not token
+        self.api_token: str = token or secrets.token_urlsafe(24)
         self.paths = ServerPaths(self.cfg.store_path)
         self.sessions = SessionStore(self.paths, self.cfg.server.session_id_chars)
         self.active = ActiveIndex(self.cfg, self.paths)
@@ -68,7 +74,11 @@ class SpectRAGServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-        add = app.add_api_route
+        auth = [Depends(self._require_token)]
+
+        def add(path, endpoint, methods):
+            app.add_api_route(path, endpoint, methods=methods, dependencies=auth)
+
         add("/api/status",                    self.get_status,      methods=["GET"])
         add("/api/sessions",                  self.list_sessions,   methods=["GET"])
         add("/api/sessions",                  self.create_session,  methods=["POST"])
@@ -81,11 +91,22 @@ class SpectRAGServer:
         add("/api/sessions/{sid}/query",      self.query,           methods=["POST"])
         return app
 
+    def _require_token(self, request: Request) -> None:
+        """401 unless the request carries ``Authorization: Bearer <token>``."""
+        scheme, _, supplied = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+                supplied.strip().encode(), self.api_token.encode()):
+            raise HTTPException(401, "Missing or invalid API token.",
+                                headers={"WWW-Authenticate": "Bearer"})
+
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI):
         self.paths.sessions_dir.mkdir(parents=True, exist_ok=True)
         logger.info("SpectRAG server ready — %d session(s) on disk.",
                     len(self.sessions.list_all()))
+        if self._token_generated:
+            logger.warning("No SPECTRAG_SERVER_TOKEN set; generated API token for this run: %s",
+                           self.api_token)
         yield
         self.active.close()
 
