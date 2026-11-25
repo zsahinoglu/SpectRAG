@@ -6,15 +6,8 @@ from pathlib import Path
 
 import numpy as np
 import faiss
-import ollama
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-    before_sleep_log,
-)
 from rag_system.models import Chunk
+from spectrag.embedders.ollama import OllamaEmbedder as _OllamaEmbedder
 from config import OllamaConfig
 
 logger = logging.getLogger(__name__)
@@ -70,95 +63,34 @@ class _EmbeddingCache:
             pass
 
 
-class OllamaEmbedder:
-    """Batch embedder backed by Ollama's nomic-embed-text."""
+class OllamaEmbedder(_OllamaEmbedder):
+    """`spectrag.embedders.OllamaEmbedder` configured from `OllamaConfig`.
 
-    # nomic-embed-text is trained with task-instruction prefixes: documents must
-    # be embedded as "search_document: ..." and queries as "search_query: ...".
-    # Omitting them degrades retrieval and collapses the query/document
-    # asymmetry. Only applied to nomic models; other embedders get no prefix.
-    _QUERY_PREFIX = "search_query: "
-    _DOCUMENT_PREFIX = "search_document: "
+    Embedding itself (nomic task prefixes, batching, retries, normalization,
+    dimension checks) lives in the `spectrag` class. This subclass only adds the
+    pipeline helpers the indexing and query pipelines still call (`embed_chunks`
+    with its content-hash cache, `build_faiss_index`); ARCH2c moves those into
+    the pipelines so any `spectrag.Embedder` can be injected.
+    """
 
     def __init__(self, cfg: OllamaConfig) -> None:
         self.cfg = cfg
-        # Apply the configured timeout so a stalled Ollama can't hang the run forever.
-        self._client = ollama.Client(host=cfg.base_url, timeout=cfg.request_timeout)
-        self._dim: int | None = None   # inferred from the first response
+        super().__init__(
+            cfg.embedding_model,
+            host=cfg.base_url,
+            # Apply the configured timeout so a stalled Ollama can't hang the run forever.
+            timeout=cfg.request_timeout,
+            batch_size=cfg.embed_batch_size,
+            dimension=cfg.embedding_dim,
+        )
         self._emb_cache: _EmbeddingCache | None = None
 
-    def _prefix(self, kind: str) -> str:
-        """Task prefix for the current model ('' for non-nomic models)."""
-        if "nomic" not in self.cfg.embedding_model.lower():
-            return ""
-        return self._QUERY_PREFIX if kind == "query" else self._DOCUMENT_PREFIX
-
-    @retry(
-        reraise=True,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(Exception),
-        before_sleep=before_sleep_log(logger, logging.WARNING),
-    )
-    def _embed_batch(self, batch: list[str]) -> list[list[float]]:
-        """One Ollama embed call, retried with backoff on transient failures."""
-        resp = self._client.embed(model=self.cfg.embedding_model, input=batch)
-        embs = resp.embeddings
-        # Guard against silent misalignment: a short/partial response would map
-        # the wrong vector onto a chunk. Treat it as retryable.
-        if embs is None or len(embs) != len(batch):
-            raise RuntimeError(
-                f"Ollama returned {0 if embs is None else len(embs)} embeddings "
-                f"for {len(batch)} inputs"
-            )
-        return embs
-
-    def embed(self, texts: list[str], kind: str = "document") -> np.ndarray:
-        """Return (N, D) float32 array of L2-normalized embeddings.
-
-        `kind` is "document" (default) or "query" — it selects the nomic task
-        prefix. Use "query" for search queries; "document" for indexed content.
-        """
-        if not texts:
-            return np.empty((0, self._dim or self.cfg.embedding_dim), dtype=np.float32)
-
-        all_embeddings: list[list[float]] = []
-        batch_size = self.cfg.embed_batch_size
-        prefix = self._prefix(kind)
-
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start : start + batch_size]
-            if prefix:
-                batch = [prefix + t for t in batch]
-            all_embeddings.extend(self._embed_batch(batch))
-            logger.debug(
-                "Embedded %d / %d texts",
-                min(start + batch_size, len(texts)),
-                len(texts),
-            )
-
-        arr = np.array(all_embeddings, dtype=np.float32)
-        if arr.ndim != 2:
-            raise RuntimeError(f"Malformed embeddings, expected 2-D got shape {arr.shape}")
-
-        # Infer the true dimension from the model; warn once if it disagrees with
-        # config, and fail fast on any later dimension drift (e.g. model swap).
-        dim = arr.shape[1]
-        if self._dim is None:
-            self._dim = dim
-            if dim != self.cfg.embedding_dim:
-                logger.warning(
-                    "Embedding dim %d differs from configured embedding_dim %d — "
-                    "using the model's actual %d.", dim, self.cfg.embedding_dim, dim,
-                )
-        elif dim != self._dim:
-            raise RuntimeError(
-                f"Embedding dimension changed mid-run: {dim} != {self._dim}"
-            )
-
-        norms = np.linalg.norm(arr, axis=1, keepdims=True)
-        norms = np.where(norms == 0.0, 1.0, norms)
-        return arr / norms
+    def embed(self, texts, kind: str = "document") -> np.ndarray:
+        # Legacy behavior: empty input needs no server round-trip; fall back to
+        # the configured dimension until the model has reported its own.
+        if not isinstance(texts, (str, bytes)) and len(texts) == 0 and self._dim is None:
+            return np.empty((0, self.cfg.embedding_dim), dtype=np.float32)
+        return super().embed(texts, kind)
 
     def embed_chunks(self, chunks: list[Chunk]) -> None:
         """Embed all chunks in-place, reusing cached vectors for unchanged text.
