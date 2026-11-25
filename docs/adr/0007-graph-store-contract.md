@@ -1,0 +1,31 @@
+# ADR 0007: GraphStore behavioral contract
+
+- Status: accepted (H8)
+- Date: 2026-11-25
+
+## Context
+
+ADR 0002 fixed the `GraphStore` member names. `InMemoryGraphStore` (also the "file store" once
+saved/loaded as Parquet) and `Neo4jGraphClient` had drifted on details that change retrieval:
+which neighbours survive the `max_candidates` cap (set order vs. database order), edges that
+name chunks that were never written (kept as new nodes vs. dropped), and duplicate chunk ids.
+
+## Decision
+
+1. `write_graph` replaces the whole graph. Nodes are exactly the unique `chunk_id`s in `chunks`;
+   edges with an endpoint outside `chunks` are dropped.
+2. `bfs_expand` follows edges in both directions. Seeds are always returned (even unknown ones,
+   even beyond the cap). Within a hop, new nodes are admitted in **ascending chunk_id order**
+   until `len(result) >= max_candidates`.
+3. `subgraph` returns a fresh undirected graph containing every requested id, plus the induced
+   edges with a `weight` attribute.
+4. `close()` is idempotent.
+
+Executable form: `tests/conformance/graph_store.py::check_graph_store(factory)`. Run against
+in-memory, file round-trip, and Neo4j (set `SPECTRAG_TEST_NEO4J_URI`; skipped otherwise). The
+golden-corpus parity test compares full pipeline output across stores.
+
+## Consequences
+
+Retrieval is deterministic when the cap truncates a hop. Golden output was unchanged (the golden
+corpus does not truncate mid-hop). Neo4j conformance is only exercised where a server exists.

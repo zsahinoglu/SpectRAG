@@ -69,10 +69,10 @@ class Neo4jGraphClient:
             s.run("MATCH (n:Chunk) DETACH DELETE n")
 
         # Nodes
-        node_batch = [
-            {"id": c.chunk_id, "doc_id": c.doc_id, "position": c.position}
+        node_batch = list({
+            c.chunk_id: {"id": c.chunk_id, "doc_id": c.doc_id, "position": c.position}
             for c in chunks
-        ]
+        }.values())  # unique chunk ids (ADR 0007)
         logger.info("Neo4j: writing %d nodes…", len(node_batch))
         for i in range(0, len(node_batch), bs):
             with self._session() as s:
@@ -146,17 +146,20 @@ class Neo4jGraphClient:
                     MATCH (s:Chunk)-[:CONNECTED]-(n:Chunk)
                     WHERE s.id IN $frontier
                     RETURN DISTINCT n.id AS id
+                    ORDER BY id
                     """,
                     frontier=list(frontier),
                 )
                 new_frontier: set[str] = set()
+                # Same admission rule as InMemoryGraphStore (ADR 0007): ascending
+                # chunk_id within a hop until the cap is reached.
                 for record in result:
                     nid = record["id"]
                     if nid not in visited:
-                        visited.add(nid)
-                        new_frontier.add(nid)
                         if len(visited) >= max_candidates:
                             break
+                        visited.add(nid)
+                        new_frontier.add(nid)
             frontier = new_frontier
 
         return visited

@@ -58,7 +58,8 @@ class InMemoryGraphStore:
         for c in chunks:
             g.add_node(c.chunk_id, doc_id=c.doc_id, position=c.position)
         for u, v, attrs in nx_graph.edges(data=True):
-            g.add_edge(u, v, **attrs)
+            if u in g and v in g:  # edges to unknown chunks are dropped (ADR 0007)
+                g.add_edge(u, v, **attrs)
         self._graph = g
 
     # Query Stage 2 — BFS expansion (mirrors Neo4jGraphClient.bfs_expand)
@@ -75,18 +76,18 @@ class InMemoryGraphStore:
         for _ in range(hops):
             if not frontier or len(visited) >= max_candidates:
                 break
+            found = {
+                n for node in frontier if node in self._graph
+                for n in self._graph.neighbors(node)
+            } - visited
+            # Contract (ADR 0007): within a hop, admit new nodes in ascending
+            # chunk_id order until the cap is reached.
             new_frontier: set[str] = set()
-            for node in frontier:
-                if node not in self._graph:
-                    continue
-                for neighbor in self._graph.neighbors(node):
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        new_frontier.add(neighbor)
-                        if len(visited) >= max_candidates:
-                            break
+            for nid in sorted(found):
                 if len(visited) >= max_candidates:
                     break
+                visited.add(nid)
+                new_frontier.add(nid)
             frontier = new_frontier
 
         return visited
