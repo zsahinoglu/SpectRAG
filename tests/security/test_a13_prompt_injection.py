@@ -9,8 +9,11 @@ properties are checked, independent of how H7 chooses to implement them:
    passage to learn what follows the passage (the "closing"); then render it
    with a passage that contains that closing followed by new instructions. If
    the closing now appears twice, the model cannot tell where the data ends.
-   Random per-call fences, escaping, or structured content blocks all pass;
-   a fixed tag that is not escaped fails.
+   So the passage must be followed by trusted text (in the same or a later
+   content block) or be fenced by a delimiter it cannot reproduce. Random
+   per-call fences and escaping pass; a fixed tag that is not escaped fails.
+   A passage placed alone in the final content block, with nothing after it,
+   does not pass: there is then no closing that marks where the data ends.
 
 2. **Output validation.** Whatever the model returns is checked against the
    contract stated in the prompt before it is stored in the index, so a model

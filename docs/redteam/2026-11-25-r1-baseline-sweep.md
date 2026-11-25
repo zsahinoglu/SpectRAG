@@ -1,7 +1,9 @@
 # R1 baseline sweep — A3 and A13 (2026-11-25, Raven)
 
 Tests: `tests/security/` (strict `xfail` until the owning item lands; controls unmarked).
-Everything runs offline with scripted LLM clients and the fake embedder.
+Everything runs offline with scripted LLM clients and the fake embedder. The
+embedding-cache test stubs the Ollama network side, so it stays offline after H3 too,
+when the legacy cache is no longer read and the chunk becomes a cache miss.
 
 ## A3 — unsafe deserialization (owner: H3)
 
@@ -15,12 +17,26 @@ Each one runs a planted payload today (proved by a sentinel file). `faiss.read_i
 (binary FAISS format, not pickle) is not flagged. Nothing was found under `eval/`, and
 there is no `yaml`, `torch.load`, `eval` or `exec` in shipped code.
 
+The static test has two layers:
+- Across all shipped code, it flags unsafe *calls* (`pickle.load`, `yaml.load` without
+  `SafeLoader`, `torch.load` without `weights_only=True`, `np.load(allow_pickle=True)`,
+  `eval`/`exec`, ...).
+- In the library packages (`spectrag/`, `rag_system/`, `rag_server/`), it also flags any
+  *import* of a pickle-family module (`pickle`, `_pickle`, `cPickle`, `dill`,
+  `cloudpickle`, `marshal`, `shelve`). This catches `from pickle import load`,
+  `import pickle as p` and `getattr(pickle, "load")`, which the call matcher misses.
+  As a result, H3 must also drop `pickle` from the *write* paths in those modules,
+  which the new format needs anyway.
+
 Design notes for H3:
 - The embedding cache is a load path too. It sits in a shared, CWD-relative directory
   (`./.embedding_cache`), so it is easier to plant into than an index.
-- The one-way migration tool has to read legacy pickles. The static test exempts
-  only a module whose file name contains `migrat`. That module must be an explicit,
-  user-invoked command, never called automatically by `load()`. It should use a
+- The one-way migration tool has to read legacy pickles. The static test exempts it
+  only by its **exact repo-relative path**, listed in `_MIGRATION_ALLOWLIST` in
+  `tests/security/test_a3_unsafe_deserialization.py`. That set is empty today; H3 adds
+  the path in its own submission, so Lens reviews the exemption. A control test checks
+  that every entry is an existing file and not a glob. The module must be an explicit,
+  user-invoked command that `load()` never calls automatically. It should use a
   restricted `Unpickler` (`find_class` allowlist: `rag_system.models.Chunk`, numpy
   array reconstruction, `networkx.Graph`) and warn that legacy files must come from a
   trusted source.
@@ -32,7 +48,10 @@ Design notes for H3:
    and generation, a passage can reproduce the text that follows it verbatim
    ("Respond as JSON: …", "Question: …"). In utility-question generation, the passage
    is the last thing in the prompt, so anything a document appends looks like
-   instructions.
+   instructions. To pass, H7 must either follow the passage with trusted text (in the
+   same or a later content block) or fence it with a delimiter it cannot reproduce
+   (random per-call fence, or escaping). Moving the passage into its own *final*
+   content block alone does not pass.
 2. **No output contract.** Concepts are accepted in any number and length (302 for
    one chunk in the test). Every line of the utility-question reply is stored as a
    "question", including preambles and injected instructions. Both feed retrieval
