@@ -5,20 +5,24 @@ so reopening a session (or restarting the server) restores everything it had:
 
     sessions.json                     session metadata (name, messages, …)
     sessions/<id>/docs/               the session's uploaded source files
-    sessions/<id>/chunks.pkl
-    sessions/<id>/faiss.index
-    sessions/<id>/graph.pkl           that session's chunk graph
+    sessions/<id>/manifest.json       safe index format (see spectrag.formats)
+    sessions/<id>/chunks.parquet, embeddings.npy, spectral.npy, faiss.index
+    sessions/<id>/graph/              that session's chunk graph (own manifest)
+
+Legacy ``chunks.pkl`` / ``graph.pkl`` are never loaded; see spectrag.formats.migrate.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
+from spectrag.formats import MANIFEST_FILE
+
 
 class ServerPaths:
     """Resolves every on-disk path the server uses, from a single store dir."""
 
-    GRAPH_FILE = "graph.pkl"
-    CHUNKS_FILE = "chunks.pkl"
+    GRAPH_FILE = "graph"            # a directory
+    CHUNKS_FILE = MANIFEST_FILE     # an index exists once its manifest is written
 
     def __init__(self, store_dir: Path | str) -> None:
         self.store_dir = Path(store_dir)

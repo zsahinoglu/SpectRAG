@@ -1,21 +1,22 @@
 from __future__ import annotations
 import logging
-import pickle
 from pathlib import Path
 import faiss
 from rag_system.models import Chunk
+from spectrag.formats import MANIFEST_FILE, read_chunks, read_manifest, write_chunks
 
 logger = logging.getLogger(__name__)
 
-_CHUNKS_FILE  = "chunks.pkl"
 _FAISS_FILE   = "faiss.index"
 
 
 class IndexStore:
     """
-    Persists the two offline artefacts that live on disk: chunks and FAISS index.
-    The graph is now stored in Neo4j (see Neo4jGraphClient) — graph.pkl is no
-    longer written. Legacy graph.pkl files are migrated on server startup.
+    Persists the two offline artefacts that live on disk: chunks and FAISS index,
+    in the safe format of ``spectrag.formats`` (Parquet + .npy + JSON manifest with
+    checksums; no pickle). Legacy ``chunks.pkl`` indexes are never read here; convert
+    them once with ``python -m spectrag.formats.migrate <dir>``.
+    The graph is stored separately (see InMemoryGraphStore / Neo4jGraphClient).
     """
 
     def __init__(self, store_path: Path | str) -> None:
@@ -23,39 +24,25 @@ class IndexStore:
 
     def save(self, chunks: list[Chunk], faiss_index: faiss.Index) -> None:
         self.path.mkdir(parents=True, exist_ok=True)
-
-        with open(self.path / _CHUNKS_FILE, "wb") as fh:
-            pickle.dump(chunks, fh, protocol=5)
-
+        # Drop any old manifest first so an interrupted save is refused, not half-read.
+        (self.path / MANIFEST_FILE).unlink(missing_ok=True)
         faiss.write_index(faiss_index, str(self.path / _FAISS_FILE))
-
-        # spectral_coords are a Chunk field and are already persisted inside
-        # chunks.pkl, so no separate spectral.npy is written. (The old side file
-        # was reloaded by absolute position, which silently misaligned coords onto
-        # the wrong chunks if any chunk lacked coords — see possible_fixes CASE-08.)
-
+        # spectral_coords and embeddings are stored as row-aligned .npy matrices with
+        # explicit presence masks, so a chunk without coords can never shift the rest
+        # (CASE-08).
+        write_chunks(self.path, chunks, faiss_file=_FAISS_FILE)
         logger.info("IndexStore saved: %d chunks → %s", len(chunks), self.path)
 
     def load(self) -> tuple[list[Chunk], faiss.Index]:
-        for fname in (_CHUNKS_FILE, _FAISS_FILE):
-            if not (self.path / fname).exists():
-                raise FileNotFoundError(
-                    f"Index artefact missing: {self.path / fname}\n"
-                    "Upload documents to build the index."
-                )
-
-        with open(self.path / _CHUNKS_FILE, "rb") as fh:
-            chunks: list[Chunk] = pickle.load(fh)
-
+        if not (self.path / MANIFEST_FILE).exists() and not (self.path / "chunks.pkl").exists():
+            raise FileNotFoundError(
+                f"Index artefact missing: {self.path / MANIFEST_FILE}\n"
+                "Upload documents to build the index."
+            )
+        manifest = read_manifest(self.path)      # raises IndexFormatError; verifies checksums
+        if _FAISS_FILE not in manifest["files"]:
+            raise FileNotFoundError(f"{_FAISS_FILE} not part of the index at {self.path}")
+        chunks = read_chunks(self.path)
         faiss_index = faiss.read_index(str(self.path / _FAISS_FILE))
-
-        # spectral_coords come back with the chunks from the pickle above; any
-        # legacy spectral.npy side file is intentionally ignored (see CASE-08).
-
         logger.info("IndexStore loaded: %d chunks from %s", len(chunks), self.path)
         return chunks, faiss_index
-
-    @property
-    def legacy_graph_pkl(self) -> Path:
-        """Path to old graph.pkl if it exists (for migration)."""
-        return self.path / "graph.pkl"

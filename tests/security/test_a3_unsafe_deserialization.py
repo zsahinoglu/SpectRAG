@@ -29,9 +29,6 @@ import faiss
 import numpy as np
 import pytest
 
-H3 = pytest.mark.xfail(strict=True, reason="R1/A3 open: H3 (safe on-disk format) must make "
-                                           "this pass, then drop this marker")
-
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -68,7 +65,6 @@ def test_control_payload_fires_when_unpickled(tmp_path):
 
 # ---- behavioural: planted files on the real entry points ---------------------------
 
-@H3
 def test_index_store_load_does_not_execute_planted_chunks_file(tmp_path):
     from rag_system.store.index_store import IndexStore
 
@@ -81,7 +77,6 @@ def test_index_store_load_does_not_execute_planted_chunks_file(tmp_path):
     assert not sentinel.exists(), "IndexStore.load executed code from chunks.pkl"
 
 
-@H3
 def test_graph_store_load_does_not_execute_planted_graph_file(tmp_path):
     from rag_system.store.memory_graph import InMemoryGraphStore
 
@@ -92,7 +87,6 @@ def test_graph_store_load_does_not_execute_planted_graph_file(tmp_path):
     assert not sentinel.exists(), "InMemoryGraphStore.load executed code from graph.pkl"
 
 
-@H3
 def test_server_session_load_does_not_execute_planted_files(tmp_path):
     """The path a running server takes when a user opens a session."""
     from config import Config
@@ -117,7 +111,6 @@ class _NetworkCalled(BaseException):
     ``retry_if_exception_type(Exception)`` neither retries nor sleeps on it."""
 
 
-@H3
 def test_embedding_cache_does_not_execute_planted_cache_file(tmp_path, monkeypatch):
     """A shared/restored embedding cache is loaded on the next indexing run.
 
@@ -230,7 +223,7 @@ def _in_library(rel: Path) -> bool:
 # repo-relative POSIX path, added to this set in H3's own submission (so Lens reviews
 # it). It must never be imported by a load path; the behavioural tests above check
 # that. Empty until H3 creates the module.
-_MIGRATION_ALLOWLIST: frozenset[str] = frozenset()
+_MIGRATION_ALLOWLIST: frozenset[str] = frozenset({"spectrag/formats/migrate.py"})
 
 
 def _shipped_python_files() -> list[Path]:
@@ -285,7 +278,6 @@ def test_control_scanner_detects_evasive_pickle_imports():
         assert (REPO / entry).is_file(), f"allowlisted migration module missing: {entry}"
 
 
-@H3
 def test_no_unsafe_deserialization_in_shipped_code():
     hits = []
     for p in _shipped_python_files():
