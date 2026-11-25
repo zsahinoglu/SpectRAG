@@ -179,6 +179,25 @@ def test_stage4_token_budget_is_respected(index):
     assert 1 <= len(picked) <= 2
 
 
+def test_coverage_order_negative_scores_no_crash(index):
+    # F1/F4 regression: best < 0 made the tie band empty -> IndexError.
+    cfg, _, chunks, _, _ = index
+    sel = ClusterAwareSelector(cfg)
+    sel.token_tie_band = 0.1
+    order = sel._coverage_order([0, 1], {0: -0.1, 1: -0.2}, chunks)
+    assert sorted(order) == [0, 1]
+
+
+def test_token_budget_select_negative_scores(index):
+    cfg, _, chunks, _, _ = index
+    sel = ClusterAwareSelector(cfg)
+    sel._enc = offline_encoder()
+    sel.token_tie_band = 0.1
+    scores = {0: -0.1, 1: -0.2, 2: -0.15}
+    picked = sel._token_budget_select([0, 1, 2], scores, chunks)
+    assert picked and picked[0] == 0 and set(picked) <= {0, 1, 2}
+
+
 # ---- Full pipeline: golden --------------------------------------------------
 
 def _run_all(cfg, emb, chunks, fidx, store):
