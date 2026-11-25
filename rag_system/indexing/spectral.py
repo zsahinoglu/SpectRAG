@@ -22,6 +22,10 @@ _LAYER_ORDER = (
 _ARPACK_SHIFT = -1e-3
 
 
+class SpectralConvergenceError(RuntimeError):
+    """ARPACK failed to converge after all retries; no partial result is used."""
+
+
 class SpectralComputer:
     """
     Computes top-k eigenvectors of the normalised graph Laplacian.
@@ -37,6 +41,8 @@ class SpectralComputer:
         self._large_threshold = cfg.spectral_large_graph_threshold
         self._lobpcg_max_iter = cfg.spectral_lobpcg_max_iter
         self._lobpcg_tol      = cfg.spectral_lobpcg_tol
+        # Filled by every solve; written to the index manifest by the pipeline.
+        self.diagnostics: dict = {}
 
     def compute(self, G: nx.Graph, chunks: list[Chunk]) -> np.ndarray:
         """Assigns spectral_coords in-place to each chunk. Returns (n, k) float32."""
@@ -64,11 +70,15 @@ class SpectralComputer:
             if chunk_idx is not None:
                 result[chunk_idx] = vecs[graph_idx].astype(np.float32)
 
-        # Chunks not in the graph stay all-zeros, which collapses them to one
-        # point in the visualisation.  Assign them position-interpolated coords
-        # within the range of the valid spectral coordinates.
-        valid_mask = np.any(result != 0.0, axis=1)
-        self._interpolate_isolated(result, chunks, valid_mask)
+        # Isolated chunks (no edges, or absent from the graph) get zero spectral
+        # credit: all-zero coords, never interpolated from their position.
+        connected = np.zeros(n, dtype=bool)
+        deg = A.getnnz(axis=1)
+        for graph_idx, node_id in enumerate(nodes):
+            chunk_idx = chunk_id_to_idx.get(node_id)
+            if chunk_idx is not None and deg[graph_idx] > 0:
+                connected[chunk_idx] = True
+        self._zero_isolated(result, connected)
 
         for i, chunk in enumerate(chunks):
             chunk.spectral_coords = result[i]
@@ -126,7 +136,7 @@ class SpectralComputer:
         vecs = self._solve(sp.csr_matrix(L_multi), n)
 
         result = vecs.astype(np.float32)
-        self._interpolate_isolated(result, chunks, connected)
+        self._zero_isolated(result, connected)
 
         for i, chunk in enumerate(chunks):
             chunk.spectral_coords = result[i]
@@ -152,41 +162,54 @@ class SpectralComputer:
             else self._arpack(L, k_req)
         )
 
-    def _interpolate_isolated(
-        self, result: np.ndarray, chunks: list[Chunk], valid_mask: np.ndarray
-    ) -> None:
-        """Give disconnected chunks position-interpolated coords inside the valid range."""
-        n = len(chunks)
-        n_valid = int(valid_mask.sum())
-        if not (0 < n_valid < n):
-            return
-        v_min = result[valid_mask].min(axis=0)
-        v_max = result[valid_mask].max(axis=0)
-        v_range = np.where((v_max - v_min) > 0, v_max - v_min, 1.0)
-        for i, chunk in enumerate(chunks):
-            if not valid_mask[i]:
-                t = chunk.position / max(n - 1, 1)
-                result[i] = v_min + t * v_range
+    def _zero_isolated(self, result: np.ndarray, connected: np.ndarray) -> None:
+        """Isolated chunks get all-zero coords (zero spectral credit)."""
+        n_iso = int((~connected).sum())
+        result[~connected] = 0.0
+        self.diagnostics["n_isolated"] = n_iso
+        if n_iso:
+            logger.info("Spectral: %d isolated chunk(s) get zero spectral credit", n_iso)
 
     def _arpack(self, L: sp.spmatrix, k: int) -> np.ndarray:
         # Deterministic start vector so degenerate spectra give reproducible
         # eigenvectors across identical runs (ARPACK is otherwise randomly seeded).
-        v0 = np.ones(L.shape[0], dtype=np.float64) / np.sqrt(L.shape[0])
-        try:
-            # Preferred: shift-invert around a small negative shift — robust & fast
-            # for the smallest eigenvalues.
-            eigenvalues, eigenvectors = spla.eigsh(
-                L, k=k, sigma=_ARPACK_SHIFT, which="LM", v0=v0
-            )
-        except Exception as exc:  # noqa: BLE001 — singular factorization, non-convergence…
-            logger.warning("Shift-invert eigsh failed (%s); retrying which='SM'", exc)
+        n = L.shape[0]
+        v0 = np.ones(n, dtype=np.float64) / np.sqrt(n)
+        # Attempts: shift-invert (fast), then which="SM" with default and then
+        # enlarged iteration budgets. Non-convergence never yields a partial result.
+        attempts = [
+            dict(sigma=_ARPACK_SHIFT, which="LM"),
+            dict(which="SM"),
+            dict(which="SM", maxiter=n * 100, ncv=min(n, max(4 * k + 1, 40))),
+        ]
+        last_exc: Exception | None = None
+        for i, kw in enumerate(attempts):
             try:
-                eigenvalues, eigenvectors = spla.eigsh(L, k=k, which="SM", v0=v0)
-            except spla.ArpackNoConvergence as exc2:
-                logger.warning("ARPACK did not converge, using partial result: %s", exc2)
-                eigenvalues, eigenvectors = exc2.eigenvalues, exc2.eigenvectors
+                eigenvalues, eigenvectors = spla.eigsh(L, k=k, v0=v0, **kw)
+                break
+            except Exception as exc:  # noqa: BLE001 — singular factorization, non-convergence…
+                last_exc = exc
+                logger.warning("eigsh attempt %d/%d failed (%s)", i + 1, len(attempts), exc)
+        else:
+            raise SpectralConvergenceError(
+                f"ARPACK failed to converge after {len(attempts)} attempts: {last_exc}"
+            ) from last_exc
         order = np.argsort(eigenvalues)
-        return eigenvectors[:, order[1:]]  # drop trivial constant eigenvector
+        eigenvalues, eigenvectors = eigenvalues[order], eigenvectors[:, order]
+        self._record_residuals(L, eigenvalues, eigenvectors, solver="arpack")
+        return eigenvectors[:, 1:]  # drop trivial constant eigenvector
+
+    def _record_residuals(self, L, eigenvalues, eigenvectors, solver: str) -> None:
+        res = np.linalg.norm(L @ eigenvectors - eigenvectors * eigenvalues, axis=0)
+        res = [float(r) for r in res]
+        self.diagnostics.update(
+            solver=solver,
+            eigenvalues=[float(e) for e in eigenvalues],
+            residual_norms=res,
+            max_residual_norm=max(res),
+        )
+        logger.info("Spectral (%s): max residual norm %.3e over %d eigenpairs",
+                    solver, max(res), len(res))
 
     def _lobpcg(self, L: sp.spmatrix, k: int) -> np.ndarray:
         n = L.shape[0]
@@ -201,7 +224,9 @@ class SpectralComputer:
                 tol=self._lobpcg_tol,
             )
             order = np.argsort(eigenvalues)
-            return eigenvectors[:, order[1:]]
+            eigenvalues, eigenvectors = eigenvalues[order], eigenvectors[:, order]
+            self._record_residuals(L, eigenvalues, eigenvectors, solver="lobpcg")
+            return eigenvectors[:, 1:]
         except Exception as exc:
             logger.warning("LOBPCG failed, falling back to ARPACK: %s", exc)
             return self._arpack(L, k)

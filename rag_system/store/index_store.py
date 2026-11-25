@@ -22,7 +22,7 @@ class IndexStore:
     def __init__(self, store_path: Path | str) -> None:
         self.path = Path(store_path)
 
-    def save(self, chunks: list[Chunk], faiss_index: faiss.Index) -> None:
+    def save(self, chunks: list[Chunk], faiss_index: faiss.Index, **meta) -> None:
         self.path.mkdir(parents=True, exist_ok=True)
         # Drop any old manifest first so an interrupted save is refused, not half-read.
         (self.path / MANIFEST_FILE).unlink(missing_ok=True)
@@ -30,7 +30,7 @@ class IndexStore:
         # spectral_coords and embeddings are stored as row-aligned .npy matrices with
         # explicit presence masks, so a chunk without coords can never shift the rest
         # (CASE-08).
-        write_chunks(self.path, chunks, faiss_file=_FAISS_FILE)
+        write_chunks(self.path, chunks, faiss_file=_FAISS_FILE, **meta)
         logger.info("IndexStore saved: %d chunks → %s", len(chunks), self.path)
 
     def load(self) -> tuple[list[Chunk], faiss.Index]:
