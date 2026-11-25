@@ -1,7 +1,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import NamedTuple
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 
 
 class RawEdge(NamedTuple):

@@ -3,9 +3,12 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from rag_system.models import Chunk
+from spectrag.llms import NoLLM
+from spectrag.models import Chunk
+from spectrag.protocols import Embedder, IndexLLM
+from rag_system.components import build_embedder, build_llm
 from rag_system.indexing.chunker import DocumentChunker
-from rag_system.indexing.embedder import OllamaEmbedder
+from rag_system.indexing.embedder import build_faiss_index, embed_chunks
 from rag_system.indexing.edges.semantic import SemanticEdgeExtractor
 from rag_system.indexing.edges.adjacency import AdjacencyEdgeExtractor
 from rag_system.indexing.edges.section import SectionEdgeExtractor
@@ -34,16 +37,26 @@ class IndexingPipeline:
 
     The NetworkX graph built here is used only for spectral decomposition;
     the persistent graph store is Neo4j (via neo4j_client.write_graph).
+
+    `embedder` (any `spectrag.Embedder`) and `llm` (any `spectrag.IndexLLM`,
+    used for concepts and utility questions) are injected; when omitted they are
+    built from `cfg` (`rag_system.components`). With `NoLLM` the two
+    LLM-derived edge signals are skipped.
     """
 
-    def __init__(self, cfg: Config, neo4j_client: Neo4jGraphClient) -> None:
+    def __init__(self, cfg: Config, neo4j_client: Neo4jGraphClient, *,
+                 embedder: Embedder | None = None, llm: IndexLLM | None = None) -> None:
         self.cfg = cfg
         self.neo4j_client = neo4j_client
-        self.embedder = OllamaEmbedder(cfg.ollama)
+        self.embedder = embedder if embedder is not None else build_embedder(cfg)
+        self.llm = llm  # None → per-signal backends from cfg, built lazily in index()
         self.chunker = DocumentChunker(cfg.indexing, cfg.language, embedder=self.embedder)
         self.graph_builder = GraphBuilder(cfg)
         self.spectral = SpectralComputer(cfg.indexing)
         self.cluster_assigner = SpectralClusterAssigner(cfg.indexing)
+
+    def _llm_for(self, backend: str) -> IndexLLM:
+        return self.llm if self.llm is not None else build_llm(self.cfg, backend)
 
     def index(
         self,
@@ -71,8 +84,8 @@ class IndexingPipeline:
 
         # 2. Embed
         _report(f"Embedding {len(all_chunks)} chunks…")
-        self.embedder.embed_chunks(all_chunks)
-        faiss_index = self.embedder.build_faiss_index(all_chunks)
+        embed_chunks(self.embedder, all_chunks, self.cfg.ollama.embedding_cache_dir)
+        faiss_index = build_faiss_index(all_chunks, self.embedder.dimension)
         _report("Embedding done")
 
         # 3. Edge signals
@@ -83,17 +96,21 @@ class IndexingPipeline:
         adjacency = AdjacencyEdgeExtractor().extract(all_chunks)
         section = SectionEdgeExtractor(self.cfg.indexing).extract(all_chunks)
 
+        icfg = self.cfg.indexing
         _report(f"Edges: entity (NER on {len(all_chunks)} chunks)")
+        concept_llm = (self._llm_for(icfg.concept_llm_backend)
+                       if icfg.entity_extraction_mode == "llm_concepts" else None)
         entity = EntityEdgeExtractor(
-            self.cfg.indexing, self.cfg.ner, self.cfg.language, self.cfg.ollama, self.cfg.openai,
-            self.cfg.anthropic,
+            icfg, self.cfg.ner, self.cfg.language, self.cfg.ollama, llm=concept_llm,
         ).extract(all_chunks)
 
-        _report(f"Edges: utility-questions ({len(all_chunks)} LLM calls)")
-        uq = UtilityQuestionEdgeExtractor(
-            self.cfg.indexing, self.cfg.ollama, self.embedder, self.cfg.openai,
-            self.cfg.anthropic,
-        ).extract(all_chunks)
+        uq_llm = self._llm_for(icfg.utility_question_llm_backend)
+        if isinstance(uq_llm, NoLLM):
+            _report("Edges: utility-questions skipped (NoLLM)")
+            uq = []
+        else:
+            _report(f"Edges: utility-questions ({len(all_chunks)} LLM calls)")
+            uq = UtilityQuestionEdgeExtractor(icfg, uq_llm, self.embedder).extract(all_chunks)
 
         _report("Edges: citation")
         citation = CitationEdgeExtractor().extract(all_chunks)

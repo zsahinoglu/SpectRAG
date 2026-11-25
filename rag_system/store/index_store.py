@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import faiss
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from spectrag.formats import MANIFEST_FILE, read_chunks, read_manifest, write_chunks
 
 logger = logging.getLogger(__name__)

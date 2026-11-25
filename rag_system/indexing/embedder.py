@@ -5,8 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import faiss
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from spectrag.embedders.ollama import OllamaEmbedder as _OllamaEmbedder
+from spectrag.protocols import Embedder
 from config import OllamaConfig
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 def _text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe(name: str) -> str:
+    return name.replace("/", "_").replace(":", "_")
 
 
 class _EmbeddingCache:
@@ -25,23 +30,30 @@ class _EmbeddingCache:
     recompute is skipped.
     """
 
-    def __init__(self, cache_dir: str, model: str) -> None:
+    def __init__(self, cache_dir: str, model: str, legacy_model: str | None = None) -> None:
         self._dir = Path(cache_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         # Model in the filename so switching embedders never serves stale vectors.
         # Plain-array .npz (keys + vectors), read with allow_pickle=False. Legacy
         # `<model>.pkl` caches are ignored, never loaded: they are just cache misses.
-        self._file = self._dir / f"{model.replace('/', '_')}.npz"
+        # `legacy_model` names a pre-ARCH2c file that is read if `model`'s is absent.
+        self._file = self._dir / f"{_safe(model)}.npz"
         self._cache: dict[str, np.ndarray] = {}
-        if self._file.exists():
+        candidates = [self._file]
+        if legacy_model:
+            candidates.append(self._dir / f"{legacy_model.replace('/', '_')}.npz")
+        for f in candidates:
+            if not f.exists():
+                continue
             try:
-                with np.load(self._file, allow_pickle=False) as npz:
+                with np.load(f, allow_pickle=False) as npz:
                     keys, vecs = npz["keys"], npz["vectors"]
                 if vecs.ndim != 2 or len(keys) != len(vecs):
                     raise ValueError("misaligned embedding cache")
                 self._cache = {str(k): v for k, v in zip(keys, vecs)}
             except Exception:  # noqa: BLE001 — a corrupt cache must not abort indexing
                 self._cache = {}
+            break
         self._dirty = False
 
     def __contains__(self, key: str) -> bool:
@@ -70,14 +82,57 @@ class _EmbeddingCache:
             pass
 
 
-class OllamaEmbedder(_OllamaEmbedder):
-    """`spectrag.embedders.OllamaEmbedder` configured from `OllamaConfig`.
+def embed_chunks(embedder: Embedder, chunks: list[Chunk], cache_dir: str | None = None) -> None:
+    """Set `chunk.embedding` for every chunk using any `spectrag.Embedder`.
 
-    Embedding itself (nomic task prefixes, batching, retries, normalization,
-    dimension checks) lives in the `spectrag` class. This subclass only adds the
-    pipeline helpers the indexing and query pipelines still call (`embed_chunks`
-    with its content-hash cache, `build_faiss_index`); ARCH2c moves those into
-    the pipelines so any `spectrag.Embedder` can be injected.
+    With `cache_dir`, vectors are cached on disk by text hash in one file per
+    `embedder.model_id`, so re-indexing only embeds genuinely new chunks.
+    """
+    if not chunks:
+        return
+    if cache_dir is None:
+        vecs = embedder.embed([c.text for c in chunks], kind="document")
+        for chunk, vec in zip(chunks, vecs):
+            chunk.embedding = vec
+        return
+    model_id = embedder.model_id
+    # Pre-ARCH2c caches are named after the bare model ("nomic-embed-text.npz").
+    cache = _EmbeddingCache(cache_dir, model_id, legacy_model=model_id.split(":", 1)[-1])
+    keys = [_text_hash(c.text) for c in chunks]
+    miss_idx = [i for i, k in enumerate(keys) if k not in cache]
+    if miss_idx:
+        miss_embs = embedder.embed([chunks[i].text for i in miss_idx], kind="document")
+        for pos, i in enumerate(miss_idx):
+            cache.put(keys[i], miss_embs[pos])
+        cache.flush()
+    logger.info("Embeddings: %d computed, %d reused from cache",
+                len(miss_idx), len(chunks) - len(miss_idx))
+    for chunk, key in zip(chunks, keys):
+        chunk.embedding = cache.get(key)
+
+
+def build_faiss_index(chunks: list[Chunk], dimension: int) -> faiss.IndexFlatIP:
+    """Exact inner-product FAISS index over already-embedded chunks (row i = chunks[i])."""
+    missing = [c.chunk_id for c in chunks if c.embedding is None]
+    if missing:
+        raise ValueError(
+            f"{len(missing)} chunk(s) not embedded (e.g. {missing[:3]}) — "
+            "call embed_chunks() before build_faiss_index()."
+        )
+    if not chunks:
+        return faiss.IndexFlatIP(dimension)
+    matrix = np.stack([c.embedding for c in chunks]).astype(np.float32)
+    index = faiss.IndexFlatIP(matrix.shape[1])   # use the real embedding dim
+    index.add(matrix)
+    return index
+
+
+class OllamaEmbedder(_OllamaEmbedder):
+    """Deprecated: `spectrag.embedders.OllamaEmbedder` configured from `OllamaConfig`.
+
+    Kept for callers that build an embedder from `OllamaConfig` and use the
+    `embed_chunks`/`build_faiss_index` methods; the pipelines now use the
+    module-level functions with any `spectrag.Embedder` (ARCH2c).
     """
 
     def __init__(self, cfg: OllamaConfig) -> None:
@@ -90,7 +145,6 @@ class OllamaEmbedder(_OllamaEmbedder):
             batch_size=cfg.embed_batch_size,
             dimension=cfg.embedding_dim,
         )
-        self._emb_cache: _EmbeddingCache | None = None
 
     def embed(self, texts, kind: str = "document") -> np.ndarray:
         # Legacy behavior: empty input needs no server round-trip; fall back to
@@ -100,48 +154,9 @@ class OllamaEmbedder(_OllamaEmbedder):
         return super().embed(texts, kind)
 
     def embed_chunks(self, chunks: list[Chunk]) -> None:
-        """Embed all chunks in-place, reusing cached vectors for unchanged text.
-
-        Only chunks whose text is not already in the content-hash cache are sent to
-        Ollama; the rest are served from disk. This makes re-indexing after adding
-        documents pay embedding cost only for genuinely new chunks.
-        """
-        if not chunks:
-            return
-        if self._emb_cache is None:
-            self._emb_cache = _EmbeddingCache(
-                self.cfg.embedding_cache_dir, self.cfg.embedding_model
-            )
-
-        keys = [_text_hash(c.text) for c in chunks]
-        miss_idx = [i for i, k in enumerate(keys) if k not in self._emb_cache]
-
-        if miss_idx:
-            miss_embs = self.embed([chunks[i].text for i in miss_idx], kind="document")
-            for pos, i in enumerate(miss_idx):
-                self._emb_cache.put(keys[i], miss_embs[pos])
-            self._emb_cache.flush()
-            logger.info(
-                "Embeddings: %d computed, %d reused from cache",
-                len(miss_idx), len(chunks) - len(miss_idx),
-            )
-        else:
-            logger.info("Embeddings: all %d reused from cache", len(chunks))
-
-        for chunk, key in zip(chunks, keys):
-            chunk.embedding = self._emb_cache.get(key)
+        """Module-level `embed_chunks` with the configured `embedding_cache_dir`."""
+        embed_chunks(self, chunks, self.cfg.embedding_cache_dir)
 
     def build_faiss_index(self, chunks: list[Chunk]) -> faiss.IndexFlatIP:
-        """Build an exact inner-product FAISS index from already-embedded chunks."""
-        missing = [c.chunk_id for c in chunks if c.embedding is None]
-        if missing:
-            raise ValueError(
-                f"{len(missing)} chunk(s) not embedded (e.g. {missing[:3]}) — "
-                "call embed_chunks() before build_faiss_index()."
-            )
-        if not chunks:
-            return faiss.IndexFlatIP(self._dim or self.cfg.embedding_dim)
-        matrix = np.stack([c.embedding for c in chunks]).astype(np.float32)
-        index = faiss.IndexFlatIP(matrix.shape[1])   # use the real embedding dim
-        index.add(matrix)
-        return index
+        """Module-level `build_faiss_index`."""
+        return build_faiss_index(chunks, self._dim or self.cfg.embedding_dim)

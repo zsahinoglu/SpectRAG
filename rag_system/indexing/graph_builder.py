@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 import networkx as nx
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.indexing.edges.base import RawEdge
 from config import Config, EdgeWeights
 

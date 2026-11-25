@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from config import Config
 
 

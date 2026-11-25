@@ -1,11 +1,12 @@
 from __future__ import annotations
 import logging
 from collections import defaultdict
-from rag_system.models import Chunk
+from spectrag.models import Chunk
+from spectrag.llms import NoLLM
+from spectrag.protocols import IndexLLM
 from rag_system.indexing.edges.base import EdgeExtractor, RawEdge
 from rag_system.ner.extractor import HybridNERExtractor
-from config import (AnthropicConfig, IndexingConfig, LanguageConfig, NERConfig,
-                    OllamaConfig, OpenAIConfig)
+from config import IndexingConfig, LanguageConfig, NERConfig, OllamaConfig
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,8 @@ class EntityEdgeExtractor(EdgeExtractor):
     Terms come from either spaCy/GLiNER NER ("ner") or LLM concept extraction
     ("llm_concepts", see llm_concept.py) per `entity_extraction_mode`. The edge
     logic is identical — chunks sharing a term get linked — only the term source
-    changes."""
+    changes. "llm_concepts" needs `llm` (any `spectrag.IndexLLM`); with `NoLLM`
+    the signal is skipped and yields no edges."""
 
     def __init__(
         self,
@@ -24,19 +26,25 @@ class EntityEdgeExtractor(EdgeExtractor):
         ner_cfg: NERConfig,
         lang_cfg: LanguageConfig | None = None,
         ollama_cfg: OllamaConfig | None = None,
-        openai_cfg: OpenAIConfig | None = None,
-        anthropic_cfg: AnthropicConfig | None = None,
+        *,
+        llm: IndexLLM | None = None,
     ) -> None:
         self._min_freq     = cfg.entity_min_freq
         self._log_interval = cfg.entity_log_interval
         self._mode         = cfg.entity_extraction_mode
+        self._skip         = False
+        self._concept = self._ner = None
         if self._mode == "llm_concepts":
-            from rag_system.indexing.edges.llm_concept import LLMConceptExtractor
-            self._concept = LLMConceptExtractor(openai_cfg, cfg, anthropic_cfg)
-            self._ner = None
+            if llm is None:
+                raise TypeError("entity_extraction_mode='llm_concepts' needs llm= (an IndexLLM)")
+            if isinstance(llm, NoLLM):
+                logger.warning("NoLLM configured: LLM concept edges are skipped")
+                self._skip = True
+            else:
+                from rag_system.indexing.edges.llm_concept import LLMConceptExtractor
+                self._concept = LLMConceptExtractor(llm, cfg)
         else:
             self._ner = HybridNERExtractor(ner_cfg, lang_cfg, ollama_cfg)
-            self._concept = None
 
     def _terms(self, chunk: Chunk) -> list[str]:
         if self._concept is not None:
@@ -44,6 +52,8 @@ class EntityEdgeExtractor(EdgeExtractor):
         return [ent.normalized for ent in self._ner.extract(chunk.text, language=chunk.language)]
 
     def extract(self, chunks: list[Chunk]) -> list[RawEdge]:
+        if self._skip:
+            return []
         entity_to_chunks: dict[str, list[int]] = defaultdict(list)
         if self._concept is not None:
             # Parallel LLM concept extraction (llm_parallel_workers threads);

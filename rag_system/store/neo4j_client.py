@@ -7,7 +7,7 @@ from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
 
 if TYPE_CHECKING:
-    from rag_system.models import Chunk
+    from spectrag.models import Chunk
     from config import Neo4jConfig
 
 logger = logging.getLogger(__name__)

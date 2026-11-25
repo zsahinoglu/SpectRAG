@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
 from collections import defaultdict
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.indexing.edges.base import EdgeExtractor, RawEdge
 
 _CITE_BRACKET_RE = re.compile(r"\[(\d+(?:[,;]\s*\d+)*)\]")

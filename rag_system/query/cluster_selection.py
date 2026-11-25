@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import networkx as nx
 from sklearn.cluster import KMeans
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from config import Config
 
 logger = logging.getLogger(__name__)

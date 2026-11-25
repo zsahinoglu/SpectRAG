@@ -15,9 +15,6 @@ ollama>=0.2
 # Anthropic Python client (default hosted LLM: Claude Haiku — concepts, questions, generation)
 anthropic>=0.40
 
-# Legacy OpenAI backend (opt-in only; not used by default)
-openai>=1.0
-
 # .env loading (SPECTRAG_ANTHROPIC_API_KEY, etc.)
 python-dotenv>=1.0
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from collections import defaultdict
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.indexing.edges.base import EdgeExtractor, RawEdge
 from config import IndexingConfig
 

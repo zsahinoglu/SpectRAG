@@ -1,8 +1,10 @@
 from __future__ import annotations
 import logging
-from rag_system.models import Chunk
+from spectrag.models import Chunk
+from spectrag.llms import NoLLM
+from spectrag.protocols import IndexLLM
+from rag_system.components import build_llm, generation_sampling
 from rag_system.language.detector import detect_language, language_name
-from rag_system.llm import anthropic_complete, make_anthropic_client
 from config import Config
 from prompts import GENERATION_SYSTEM, GENERATION_CONTEXT_BLOCK
 
@@ -10,32 +12,20 @@ logger = logging.getLogger(__name__)
 
 
 class Generator:
-    """Stage 5 — formats retrieved context and calls the LLM (Claude Haiku by default)."""
+    """Stage 5 — formats retrieved context and asks the LLM (Claude Haiku by default).
 
-    def __init__(self, cfg: Config, client=None) -> None:
-        """`client` lets tests inject a mocked LLM client for the chosen backend."""
-        self._backend  = cfg.generation_backend
+    `llm` is any `spectrag.IndexLLM`; when omitted it is built from
+    `cfg.generation_backend`. With `NoLLM` no answer is generated (`""`).
+    """
+
+    def __init__(self, cfg: Config, llm: IndexLLM | None = None) -> None:
         self._lang_cfg = cfg.language
-        if self._backend == "anthropic":
-            self._llm_cfg = cfg.anthropic
-            self._client  = client or make_anthropic_client(
-                cfg.anthropic, "the final-answer generator")
-        elif self._backend == "openai":
-            self._llm_cfg = cfg.openai
-            if not cfg.openai.api_key:
-                raise ValueError(
-                    "OPENAI_API_KEY is not set — generation_backend='openai' requires it."
-                )
-            from openai import OpenAI
-            self._client = client or OpenAI(
-                api_key=cfg.openai.api_key,
-                base_url=cfg.openai.base_url,
-                timeout=cfg.openai.request_timeout,
-            )
-        else:
-            raise ValueError(f"Unknown generation_backend {self._backend!r}")
+        self._llm = llm if llm is not None else build_llm(cfg, cfg.generation_backend)
+        self._temperature, self._max_tokens = generation_sampling(cfg)
 
     def generate(self, question: str, context_chunks: list[Chunk]) -> str:
+        if isinstance(self._llm, NoLLM):
+            return ""
         lang_code = detect_language(question, fallback=self._lang_cfg.fallback_language)
         lang      = language_name(lang_code)
         logger.debug("Query language detected: %s (%s)", lang, lang_code)
@@ -64,24 +54,9 @@ class Generator:
 
         system = GENERATION_SYSTEM.format(language=lang)
         user   = f"{context_text}\nQuestion: {question}\n\nAnswer:"
-
-        if self._backend == "anthropic":
-            return anthropic_complete(
-                self._client, model=self._llm_cfg.model, system=system, user=user,
-                temperature=self._llm_cfg.temperature,
-                max_tokens=self._llm_cfg.max_tokens,
-            ).strip()
-
-        resp = self._client.chat.completions.create(
-            model=self._llm_cfg.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            temperature=self._llm_cfg.temperature,
-            max_tokens=self._llm_cfg.max_tokens,
-        )
-        return (resp.choices[0].message.content or "").strip()
+        return self._llm.complete(
+            user, system=system, temperature=self._temperature, max_tokens=self._max_tokens,
+        ).strip()
 
     def close(self) -> None:
-        pass  # clients manage their own HTTP pools
+        pass  # LLM components manage their own HTTP pools

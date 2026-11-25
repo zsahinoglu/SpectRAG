@@ -2,8 +2,8 @@ from __future__ import annotations
 import re
 import numpy as np
 import faiss
-from rag_system.models import Chunk
-from rag_system.indexing.embedder import OllamaEmbedder
+from spectrag.models import Chunk
+from spectrag.protocols import Embedder
 from config import Config
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -27,7 +27,7 @@ class SeedRetriever:
     tuning). No query-time LLM cost — the questions already exist on the chunks.
     """
 
-    def __init__(self, cfg: Config, embedder: OllamaEmbedder) -> None:
+    def __init__(self, cfg: Config, embedder: Embedder) -> None:
         rc = cfg.retrieval
         self.k = rc.seed_k
         self.embedder = embedder

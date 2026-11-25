@@ -4,7 +4,7 @@ import numpy as np
 import networkx as nx
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
-from rag_system.models import Chunk
+from spectrag.models import Chunk
 from rag_system.indexing.edges.base import RawEdge
 from rag_system.indexing.graph_builder import _minmax_normalize
 from config import IndexingConfig, EdgeWeights

@@ -6,7 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file sitting next to this module,
-# so OPENAI_API_KEY (and friends) are available without exporting them manually.
+# so SPECTRAG_ANTHROPIC_API_KEY (and friends) are available without exporting them manually.
 load_dotenv(Path(__file__).with_name(".env"))
 
 
@@ -92,7 +92,8 @@ class IndexingConfig:
     # Index-time LLM for utility-question generation:
     #   "anthropic" — Claude Haiku (default; sharper, more specific questions →
     #                 better UQ edges AND better query-side seeds).
-    #   "openai" — legacy gpt-4o-mini. "ollama" — local llama3.1:8b.
+    #   "ollama" — local llama3.1:8b. "none" — no LLM: UQ edges are skipped.
+    #   Resolved to a spectrag.IndexLLM by rag_system.components (ADR 0006).
     utility_question_llm_backend: str       = "anthropic"
     utility_questions_per_chunk: int        = 2      # LLM calls per chunk; richer graph + more query-side seeds
     utility_question_threshold: float       = 0.80   # cosine sim floor for UQ edges
@@ -108,14 +109,15 @@ class IndexingConfig:
 
     # Entity / concept edges — how the shared-link terms are extracted:
     #   "ner"          — spaCy/GLiNER/LLM named-entity recognition (generic entities).
-    #   "llm_concepts" — gpt-4o-mini extracts domain CONCEPTS/topics per chunk, so
+    #   "llm_concepts" — an LLM (Claude Haiku by default) extracts domain CONCEPTS/topics per chunk, so
     #                    chunks that discuss the same idea in different words (which
     #                    cosine misses) share a concept key and get linked. The
     #                    cross-document signal ORTHOGONAL to the embedding space —
     #                    the graph's reason to exist. One LLM call per chunk (cached
     #                    on disk, so re-indexing the same corpus is free).
     entity_extraction_mode: str = "llm_concepts"
-    # LLM used for "llm_concepts": "anthropic" (default, Claude Haiku) or "openai" (legacy).
+    # LLM used for "llm_concepts": "anthropic" (default, Claude Haiku), "ollama", or
+    # "none" (concept edges skipped).
     concept_llm_backend: str    = "anthropic"
     concept_max_text_chars: int = 2000   # chars of chunk text sent to the LLM
     concept_llm_max_tokens: int = 200
@@ -127,9 +129,10 @@ class IndexingConfig:
     max_section_members: int   = 100  # cap members per section prefix (avoids O(N²))
 
     # Index-time LLM concurrency: utility-question + concept extraction issue one
-    # small OpenAI call per chunk; running them in a thread pool cuts indexing
-    # wall-clock ~Nx. Failed calls retry with exponential backoff (and are NOT
-    # cached), so transient 429/5xx errors don't poison the graph or the cache.
+    # small LLM call per chunk; running them in a thread pool cuts indexing
+    # wall-clock ~Nx. llm_max_retries is the IndexLLM's transport retry budget
+    # (429/5xx, with backoff) and the number of asks for a concept reply that fails
+    # validation. Failures are NOT cached, so they don't poison the graph or cache.
     llm_parallel_workers: int  = 8
     llm_max_retries: int       = 3
 
@@ -307,17 +310,6 @@ class AnthropicConfig:
 
 
 @dataclass
-class OpenAIConfig:
-    """Legacy OpenAI backend (opt-in via *_backend = "openai"); not used by default."""
-    api_key:         str        = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    base_url:        str | None = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL") or None)
-    model:           str        = "gpt-4o-mini"
-    temperature:     float      = 0.0    # 0 → reproducible generation across runs
-    max_tokens:      int        = 2048
-    request_timeout: int        = 120
-
-
-@dataclass
 class NERConfig:
     spacy_model: str   = "xx_core_web_sm"  # multilingual fallback; detector overrides per language
     # GLiNER is opt-in: requires PyTorch + ~1.5 GB model download.
@@ -361,9 +353,9 @@ class Config:
     indexing:     IndexingConfig = field(default_factory=IndexingConfig)
     retrieval:    RetrievalConfig = field(default_factory=RetrievalConfig)
     ollama:       OllamaConfig   = field(default_factory=OllamaConfig)
-    openai:       OpenAIConfig   = field(default_factory=OpenAIConfig)
     anthropic:    AnthropicConfig = field(default_factory=AnthropicConfig)
-    # Final-answer generator backend: "anthropic" (default) or "openai" (legacy).
+    # Final-answer generator backend: "anthropic" (default), "ollama", or "none"
+    # (retrieval only, empty answer).
     generation_backend: str      = "anthropic"
     ner:          NERConfig      = field(default_factory=NERConfig)
     neo4j:        Neo4jConfig    = field(default_factory=Neo4jConfig)

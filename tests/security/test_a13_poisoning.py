@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import pytest
 
-from config import AnthropicConfig, Config
+from config import Config
 from rag_system.indexing.edges.citation import CitationEdgeExtractor
 from rag_system.indexing.edges.entity import EntityEdgeExtractor
 from rag_system.indexing.graph_builder import GraphBuilder
+from spectrag.llms import AnthropicLLM
 from tests.golden_corpus import QUESTIONS
 from tests.test_golden_retrieval import _pipeline
 from tests.security._fixtures import (
@@ -91,8 +92,6 @@ N_HUB = 40
 
 
 def _hub_graph(monkeypatch, tmp_path, concepts_for: dict[int, list[str]]):
-    import rag_system.indexing.edges.llm_concept as llm_concept
-
     chunks = [chunk(f"d{i}-0", f"d{i}", f"passage number {i} body") for i in range(N_HUB)]
 
     def reply(prompt: str) -> str:
@@ -101,12 +100,10 @@ def _hub_graph(monkeypatch, tmp_path, concepts_for: dict[int, list[str]]):
                 return concepts_json(concepts_for.get(i, []))
         return concepts_json([])
 
-    monkeypatch.setattr(llm_concept, "make_anthropic_client",
-                        lambda *a, **k: ScriptedLLM(reply))
     cfg = Config()
     cfg.indexing.concept_cache_dir = str(tmp_path / "concepts")
     entity = EntityEdgeExtractor(cfg.indexing, cfg.ner,
-                                 anthropic_cfg=AnthropicConfig(api_key="test")).extract(chunks)
+                                 llm=AnthropicLLM(client=ScriptedLLM(reply))).extract(chunks)
     return GraphBuilder(cfg).build(chunks, [], [], [], entity, [], [])
 
 

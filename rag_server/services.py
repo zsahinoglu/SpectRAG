@@ -15,7 +15,7 @@ from rag_server.runtime import ServerPaths
 if TYPE_CHECKING:
     import faiss
     from config import Config
-    from rag_system.models import Chunk, QueryResult
+    from spectrag.models import Chunk, QueryResult
     from rag_server.session_store import SessionStore
 
 logger = logging.getLogger(__name__)

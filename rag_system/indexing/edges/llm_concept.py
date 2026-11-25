@@ -7,11 +7,13 @@ words — which cosine similarity misses — then share a concept key and get li
 This is the cross-document signal genuinely ORTHOGONAL to the embedding space,
 which is the graph's whole reason to exist.
 
-Results are cached on disk by content hash, so re-indexing the same corpus (the
-per-domain eval loop does this a lot) is free after the first pass. Failed calls
-retry with exponential backoff and are NEVER cached — a transient 429/5xx must
-not permanently strip a chunk of its concepts. extract_batch() runs the calls in
-a thread pool (llm_parallel_workers) to cut indexing wall-clock.
+Results are cached on disk by content hash, in one file per `IndexLLM.model_id`,
+so re-indexing the same corpus (the per-domain eval loop does this a lot) is free
+after the first pass. Transport errors are retried inside the `IndexLLM`; a reply
+that fails schema validation is re-asked up to `llm_max_retries` times here
+(ADR 0005). Failures are NEVER cached — a transient error must not permanently
+strip a chunk of its concepts. extract_batch() runs the calls in a thread pool
+(llm_parallel_workers) to cut indexing wall-clock.
 """
 from __future__ import annotations
 
@@ -19,42 +21,32 @@ import hashlib
 import json
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from config import AnthropicConfig, IndexingConfig, OpenAIConfig
+from config import IndexingConfig
 from prompts import CONCEPT_EXTRACTION_PROMPT
-from rag_system.llm import anthropic_complete, make_anthropic_client, parse_concepts_json
+from spectrag.llms import LLMUnavailableError
+from spectrag.protocols import IndexLLM
 
 logger = logging.getLogger(__name__)
 
+#: Output contract of CONCEPT_EXTRACTION_PROMPT (validated by `IndexLLM.complete_json`).
+CONCEPTS_SCHEMA = {
+    "type": "object",
+    "properties": {"concepts": {"type": "array", "items": {"type": "string"}}},
+    "required": ["concepts"],
+}
+
+
+def cache_name(model_id: str) -> str:
+    """Filesystem-safe form of a `model_id` for cache file names."""
+    return model_id.replace("/", "_").replace(":", "_")
+
 
 class LLMConceptExtractor:
-    def __init__(self, openai_cfg: OpenAIConfig | None, cfg: IndexingConfig,
-                 anthropic_cfg: AnthropicConfig | None = None,
-                 client=None) -> None:
-        """`client` lets tests inject a mocked LLM client for the chosen backend."""
-        self._backend = cfg.concept_llm_backend
-        if self._backend == "anthropic":
-            anthropic_cfg = anthropic_cfg or AnthropicConfig()
-            self._client = client or make_anthropic_client(
-                anthropic_cfg, "entity_extraction_mode='llm_concepts'")
-            self._model = anthropic_cfg.model
-        elif self._backend == "openai":
-            if openai_cfg is None or not openai_cfg.api_key:
-                raise ValueError(
-                    "OPENAI_API_KEY is required for concept_llm_backend='openai'."
-                )
-            from openai import OpenAI
-            self._client = client or OpenAI(
-                api_key=openai_cfg.api_key,
-                base_url=openai_cfg.base_url,
-                timeout=openai_cfg.request_timeout,
-            )
-            self._model = openai_cfg.model
-        else:
-            raise ValueError(f"Unknown concept_llm_backend {self._backend!r}")
+    def __init__(self, llm: IndexLLM, cfg: IndexingConfig) -> None:
+        self._llm = llm
         self._max_chars = cfg.concept_max_text_chars
         self._max_tokens = cfg.concept_llm_max_tokens
         self._workers = max(1, cfg.llm_parallel_workers)
@@ -62,40 +54,32 @@ class LLMConceptExtractor:
 
         self._cache_dir = Path(cfg.concept_cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._cache_file = self._cache_dir / f"{self._model}.json"
+        self._cache_file = self._cache_dir / f"{cache_name(llm.model_id)}.json"
+        # Caches written before ARCH2c are named after the bare model ("claude-haiku-5-5.json").
+        legacy = self._cache_dir / f"{llm.model_id.split(':', 1)[-1].replace('/', '_')}.json"
         self._cache: dict[str, list[str]] = {}
-        if self._cache_file.exists():
-            try:
-                self._cache = json.loads(self._cache_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._cache = {}
+        for f in (self._cache_file, legacy):
+            if f.exists():
+                try:
+                    self._cache = json.loads(f.read_text(encoding="utf-8"))
+                    break
+                except (json.JSONDecodeError, OSError):
+                    self._cache = {}
         self._dirty = 0
         self._lock = threading.Lock()  # guards _cache/_dirty across pool threads
 
     def _call_llm(self, snippet: str) -> list[str]:
-        """One extraction call with retry/backoff. Raises after final attempt."""
+        """One extraction; an invalid reply is re-asked. Raises after the final attempt."""
+        prompt = CONCEPT_EXTRACTION_PROMPT.format(text=snippet)
         last_exc: Exception | None = None
-        for attempt in range(self._max_retries):
+        for _ in range(self._max_retries):
             try:
-                prompt = CONCEPT_EXTRACTION_PROMPT.format(text=snippet)
-                if self._backend == "anthropic":
-                    raw = anthropic_complete(
-                        self._client, model=self._model, user=prompt,
-                        temperature=0.0, max_tokens=self._max_tokens)
-                else:
-                    resp = self._client.chat.completions.create(
-                        model=self._model,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.0,
-                        max_tokens=self._max_tokens,
-                        response_format={"type": "json_object"},
-                    )
-                    raw = resp.choices[0].message.content or "{}"
-                return parse_concepts_json(raw)  # schema-validated; invalid → retry
-            except Exception as exc:  # noqa: BLE001 — retry transient API/parse errors
+                data = self._llm.complete_json(
+                    prompt, CONCEPTS_SCHEMA, temperature=0.0, max_tokens=self._max_tokens)
+            except ValueError as exc:  # reply failed parsing/validation → ask again
                 last_exc = exc
-                if attempt < self._max_retries - 1:
-                    time.sleep(2 ** attempt)  # 1s, 2s, …
+                continue
+            return sorted({c.strip().lower() for c in data["concepts"] if c.strip()})
         raise last_exc  # type: ignore[misc]
 
     def extract(self, text: str) -> list[str]:
@@ -108,10 +92,11 @@ class LLMConceptExtractor:
 
         try:
             concepts = self._call_llm(snippet)
+        except LLMUnavailableError:
+            raise  # NoLLM must be handled by the caller, never turn into "no concepts"
         except Exception as exc:  # noqa: BLE001 — one bad chunk must not abort indexing
-            logger.warning("Concept extraction failed after %d attempts (%s); "
-                           "no concepts for this chunk (not cached — retried next run)",
-                           self._max_retries, exc)
+            logger.warning("Concept extraction failed (%s); no concepts for this chunk "
+                           "(not cached — retried next run)", exc)
             return []
 
         with self._lock:
