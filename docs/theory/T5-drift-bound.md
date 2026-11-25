@@ -1,7 +1,7 @@
 # T5 — Drift bound for incremental spectral indexing
 
 Status: proposal (T5p, v0.3). Consumer: H4 (incremental indexing, v0.4).
-Author: Fourier (theory). Red-team objections are answered in §8.
+Author: Fourier (theory). Red-team review pending (§8).
 
 > **Verification status.** WebSearch and local Python execution were both unavailable in the
 > session that wrote this document. Citations in §7 come from memory and are marked
@@ -29,6 +29,17 @@ global index state from scratch?
   shift-invert (`_arpack`) or, for `n > 50 000`, LOBPCG (`_lobpcg`, `tol = 1e-4`,
   `maxiter = 300`, seed 42). It **drops the eigenvector with the smallest eigenvalue**
   (`order[1:]`) and stores the remaining `k` columns as float32 `chunk.spectral_coords`.
+  Small-graph edge cases: `_solve` actually requests `k_req = min(k + 1, n − 1)` eigenpairs, so
+  for `n ≤ k + 1` the window is smaller than `r = k + 1`; and if `k_req < 2` it skips the
+  eigensolve and returns a 1-D `linspace(0.1, 1.0, n)` column. Neither case is a subspace, and
+  T5's bounds do not apply to them; H4 should treat any corpus with `n ≤ k + 1` (plus guards) as
+  "always rebuild", which costs nothing at that size.
+- After the solve, `SpectralComputer._interpolate_isolated` (spectral.py:155-169, called from
+  `compute` at :71 and `compute_multiplex` at :129) **overwrites** the rows of chunks that are
+  not in the graph or have no edge (all-zero row in `compute`; `connected[i] = False` in
+  `compute_multiplex`) with `v_min + t·v_range`. Here `v_min`, `v_max` are per-axis minima and
+  maxima over the valid rows, and `t = chunk.position/(n−1)`. These rows are not eigenvector
+  rows. §2.1 shows they break rotation invariance, and R2 below asks H4/H5 to replace them.
 - Nothing stores the eigenvalues, the `(r+1)`-th eigenvalue, or the residuals (H5 will add
   residual norms to the manifest).
 - `rag_system/indexing/cluster_assigner.py::SpectralClusterAssigner.assign` runs KMeans (K = 5)
@@ -84,24 +95,54 @@ Assumptions:
 
 ### 2.1 Retrieval depends only on the subspace (rotation invariance)
 
-**Lemma 1.** Replace `Z` by `ZQ` for any orthogonal `k × k` matrix `Q`. Then
-`_spectral_proximity`, the KMeans objective in `SpectralClusterAssigner`, and
-`_cluster_at_query_time` are unchanged. The only exceptions are floating-point effects and the
-KMeans initialization, which is equivariant given the same RNG stream. 2-D visualization of the
-raw first coordinates is *not* invariant.
+**Scope: eigensolver rows only.** Write `Z_eig` for the rows that come straight out of `_solve`
+(the chunks that have at least one edge). Lemma 1 is about these rows. The rows written by
+`_interpolate_isolated` are a different object, treated after the lemma.
+
+**Lemma 1.** Suppose every stored row is an eigensolver row (no interpolated rows). Replace `Z`
+by `ZQ` for any orthogonal `k × k` matrix `Q`. Then `_spectral_proximity`, the KMeans objective
+in `SpectralClusterAssigner`, and `_cluster_at_query_time` are unchanged. The only exceptions
+are floating-point effects and the KMeans initialization, which is equivariant given the same
+RNG stream. 2-D visualization of the raw first coordinates is *not* invariant.
 
 *Proof.* `cos(z_i, z_j) = (ZZᵀ)_{ij} / √((ZZᵀ)_{ii}(ZZᵀ)_{jj})` and
 `‖z_i − z_j‖² = (ZZᵀ)_{ii} + (ZZᵀ)_{jj} − 2(ZZᵀ)_{ij}`. Both depend only on the Gram matrix
 `ZZᵀ`, and `(ZQ)(ZQ)ᵀ = ZZᵀ`. KMeans and its k-means++ seeding depend only on pairwise
-distances. ∎
+distances. Zero rows are mapped to zero rows by `Q`, and `_spectral_proximity` gives them
+cosine 0 to every seed (diffusion.py:62-64) in every frame. ∎
 
-Consequences:
+**Interpolated rows break Lemma 1.** `_interpolate_isolated` sets
+`z_i = v_min + t_i·v_range`, where `v_min` and `v_max` are taken per axis. The map
+`Z_eig ↦ (v_min, v_max)` is not equivariant: in general `min_rows(Z_eig Q) ≠ min_rows(Z_eig)·Q`.
+So for an interpolated chunk `i`, `cos(z_i, z_s)` and its KMeans assignment depend on the
+arbitrary frame chosen by the solver, not only on `span U`. Two more problems matter for H4.
+First, the rows depend on the extreme valid rows of the whole corpus, so a single update moves
+every interpolated row, even if the subspace is unchanged. Second, A1 (solve on non-isolated
+nodes only) sends *more* chunks through this path. None of the bounds below control these rows.
+
+**Recommendation R2 (for H4/H5).** Give chunks outside the eigensolve a rotation-invariant
+treatment instead of per-axis interpolation:
+
+- store a **zero row** (diffusion.py:62-64 then gives them spectral proximity 0, which is
+  H5's planned "zero spectral credit", and they act as seeds with cosine 0 to every candidate);
+- **exclude** them from the KMeans fit, so that the centroids are equivariant (`c_b ↦ c_bQ`). The
+  label value for these chunks (for example a reserved "unclustered" label) is H5's or the
+  architect's decision, not T5's;
+- if the visualization needs spread-out positions for them, compute those in the visualization
+  layer only, never in `chunk.spectral_coords`.
+
+With R2, every stored row is an eigensolver row or a zero row, Lemma 1 holds for the whole
+index, and these chunks have zero drift by construction. R2 changes retrieval for corpora that
+have isolated chunks, so H4/H5 must run an eval on it.
+
+Consequences (for eigensolver rows, or for the whole index under R2):
 
 1. Individual eigenvectors are ill-posed objects: signs are arbitrary, and near-degenerate
    pairs inside the window rotate freely. Only `span U` matters. So drift must be measured with
    principal angles (`sinΘ`), not with per-eigenvector differences.
 2. Procrustes alignment in H4 serves only two purposes: reusing frozen KMeans centroids (§2.5)
-   and keeping the visualization stable. It does **not** change retrieval.
+   and keeping the visualization stable. Under R2 it does **not** change retrieval. Without R2
+   it changes the interpolated rows, and so the retrieval of those chunks.
 3. Only the boundary gap `δ` enters the bounds. Small gaps inside the window are harmless.
 
 **The dropped vector.** Assume the combined-mode graph is connected (`c = 1`, A1). Then
@@ -134,11 +175,15 @@ Let `V = V_old ∪ V_new`, with added nodes `𝒜 = V_new \ V_old` and removed n
 - `L̂_new` is `L_new` on `V_new`, with identity on `ℛ`.
 
 **Lemma 2.** Under A3, the bottom `r` eigenpairs of `L̂_old` are those of `L_old`, with the
-eigenvectors padded by zeros on `𝒜`. The boundary gap becomes
-`δ̂ = min(λ_r, 1) − λ_{r−1} > 0`.
+eigenvectors padded by zeros on `𝒜`. The boundary gap is
 
-*Proof.* `L̂_old` is block diagonal, `L_old ⊕ I_{|𝒜|}`, and the identity block contributes only
-eigenvalue 1, which is greater than `λ_{r−1}`. ∎
+- `δ̂ = min(λ_r, 1) − λ_{r−1} > 0` if `𝒜 ≠ ∅`;
+- `δ̂ = λ_r − λ_{r−1} = δ` if `𝒜 = ∅` (removal-only update: `L̂_old = L_old`, nothing is padded).
+
+Write `λ̂_r` for the corresponding first eigenvalue outside the window (`min(λ_r, 1)` or `λ_r`).
+
+*Proof.* `L̂_old` is block diagonal, `L_old ⊕ I_{|𝒜|}`, and the identity block (present only if
+`𝒜 ≠ ∅`) contributes only eigenvalue 1, which is greater than `λ_{r−1}`. ∎
 
 The padding value 1 is a free choice: any `c > λ_{r−1}` works. It affects only the Weyl term
 below, never `‖EU‖`, because `U` is zero on `𝒜`.
@@ -200,7 +245,8 @@ small, `‖EU‖` is small even when `E` is large.
 
 The `e₂` term is different. Suppose the added documents form a **cohesive new topic**, with most
 of their degree internal. Then `‖N′_{𝒜𝒜}‖_2 ≈ 1`, so `e₂ ≳ 1 > δ̂` and (a) does not apply,
-while (b) gives a bound of at least `2√r·e₂/δ̂ ≫ 1`, which says nothing. **This is not an
+while (b) gives `2·min(√r·e₂, ‖E‖_F)/δ̂ ≥ 2‖E‖_2/δ̂ ≳ 2/δ̂ ≫ 1` (both arguments of the
+`min` are at least `‖E‖_2 ≳ 1`), which says nothing. **This is not an
 artifact of the bound.** A new cohesive topic can create a new small eigenvalue that enters the
 window and pushes out `λ_{r−1}`, a real change of the subspace. Theorem 1 is a *screen* for the
 cheapest path (skip the solve), not a certificate for every update.
@@ -233,6 +279,91 @@ columns gives `ε_solve ≈ √r·1e-4/δ`. With `r = 33`, any `δ < 6e-3` makes
 today's cold LOBPCG path (`n > 50 000`) is itself not converged in subspace terms, and incremental
 and full builds would disagree mostly because of solver tolerance, not because of the update.
 
+### 2.4b A-posteriori certificate for the out-of-sample extension (Level 0)
+
+`η_prior` (Theorem 1) bounds the angle between `U′` and the old basis **zero-padded** on `𝒜`.
+It says nothing about the out-of-sample (OOS) rows that Level 0 actually stores for new chunks.
+In fact a small `η_prior` means `U′` has little mass on `𝒜`, so the new rows are short, and the
+cosine in `_spectral_proximity` uses only their direction. The certificate below bounds the
+subspace that Level 0 stores, including the new rows, at local cost. §2.4b(iv) states what it
+does and does not say about individual rows.
+
+**Scope.** Combined mode, with the new graph connected on the solved node set (A1, R2). Then
+`u′_0 = D′^{1/2}𝟙/√vol′` (zero on `ℛ`) is an exact eigenvector of `L̂_new` with eigenvalue 0.
+In multiplex mode there is no closed-form `u′_0` (F6), the dropped column is a real
+eigenvector, and a certificate would need a two-sided gap. **Level 0 is disabled in multiplex
+mode** until F6 is resolved; those updates start at Level 1.
+
+**(i) Construction.** For `i ∈ 𝒜` and `l < r`, let `y_{i,l} = (N′U)_{il}/(1 − λ_l)` (requires
+A3). `U` is padded, so only old neighbours contribute. Define
+
+- `X̃` = `U` with its rows on `𝒜` replaced by `Y` and its rows on `ℛ` set to 0;
+- `D = X̃ − U`, supported on `𝒜 ∪ ℛ`;
+- `G = X̃ᵀX̃ = I − U_ℛᵀU_ℛ + YᵀY`, of size `r × r`, cost `O((|𝒜| + |ℛ|)·r²)`. If `G` is
+  singular, Level 0 is rejected;
+- `X = X̃G^{-1/2}` (orthonormal). It is never formed densely: everything below is in terms of
+  `X̃` and `G`.
+
+**(ii) Residual is local.** Since `L̂_old U = UΛ`,
+
+    R̃₀ := L̂_new X̃ − X̃Λ = EU + L̂_new D − DΛ,
+
+which is supported on `T` (`L̂_new` restricted to the columns `𝒜 ∪ ℛ` touches only `𝒜 ∪ ℛ`
+and the neighbours of `𝒜`). On a new row `i ∈ 𝒜`, the definition of `y_i` cancels everything
+except `−N′_{i,𝒜}Y`, so new-to-new edges are the only residual there. Then, with
+`W = R̃₀G^{-1/2}`,
+
+    M := XᵀL̂_new X = G^{-1/2}(GΛ + X̃ᵀR̃₀)G^{-1/2},
+    R := L̂_new X − XM = (I − X̃G^{-1}X̃ᵀ) W,
+    ‖R‖_F² = ‖W‖_F² − ‖G^{-1/2}X̃ᵀW‖_F².
+
+*Proof.* `L̂_new X = (X̃Λ + R̃₀)G^{-1/2}` and `XM = (X̃Λ + X̃G^{-1}X̃ᵀR̃₀)G^{-1/2}`; subtract. The
+norm identity is Pythagoras for the orthogonal projector `X̃G^{-1}X̃ᵀ`. ∎
+
+`X̃ᵀR̃₀` and `X̃ᵀW` need only the rows of `X̃` on `T`, so the total cost is `O(nnz(E)·r + |T|·r²)`.
+
+**(iii) Removing `u′_0`.** Let `w = Xᵀu′_0 ∈ ℝ^r`, `ŵ = w/‖w‖`, and `C ∈ ℝ^{r×k}` an orthonormal
+basis of `ŵ^⊥`. The stored Level-0 coordinates are `Z_ext = XC`, which is orthonormal and
+orthogonal to `u′_0`. Computing `w` costs one `O(n·r)` mat-vec, or `O(|T|·r)` by updating the
+stored vector `Uᵀd^{1/2}`. With `M_Z = CᵀMC`,
+
+    R_Z := L̂_new Z_ext − Z_ext M_Z = RC + Xŵ(ŵᵀMC),
+    ‖R_Z‖_F² = ‖RC‖_F² + ‖ŵᵀMC‖_2²     (the cross term vanishes because XᵀR = 0).
+
+**Theorem 2b (Level-0 certificate).** Let `ℓ = λ̂_r − e₂` (Weyl, rigorous) and
+`θ_Z = λ_max(M_Z)`. If `ℓ > θ_Z`, then
+
+    ⫴sinΘ(Z_ext, Z′)⫴  ≤  ⫴R_Z⫴ / (ℓ − θ_Z)  =:  ε_ext,
+
+where `Z′ = span(u′_1, …, u′_{r−1})` is what a converged fresh solve stores under R1.
+
+*Proof.* `u′_0` is an eigenvector, so `L̂_new` maps `u′_0^⊥` into itself. On that space its
+eigenvalues are those of `L̂_new` with one copy of 0 removed. The bottom `k` of them span `Z′`,
+and the rest are `≥ λ′_r ≥ ℓ`. `Z_ext` and `R_Z` both lie in `u′_0^⊥`. Apply the Davis–Kahan
+residual theorem (as in Theorem 1(a)) inside `u′_0^⊥`, with `[a, b] ⊇ eig(M_Z)` and `b = θ_Z`. ∎
+
+**(iv) What ε_ext says about rows.** By Procrustes (§2.0), the row displacements satisfy
+`Σ_i ‖Δ_i‖² ≤ 2ε_ext²`, while `Σ_i ‖z_i‖² = k`. Because `sin φ_i ≤ ‖Δ_i‖/‖z_i‖`:
+
+- *Mass guarantee (rigorous).* Rows with `sin φ_i > s`, or with `‖Δ_i‖ ≥ ‖z_i‖`, carry at most
+  `2ε_ext²/(s²k)` of the total row mass. Example: `ε_ext = 0.05`, `s = 0.2`, `k = 32` gives 0.4%.
+- *No individual guarantee for typical rows.* Row `i` is individually certified
+  (`sin φ_i ≤ s`) only if `‖z_i‖ ≥ √2·ε_ext/s`, which is 0.35 in the example. A typical row norm
+  is `√(k/n)`, which is 0.057 at `n = 10⁴`. **So at realistic corpus sizes, Level 0 gives no
+  guarantee on how any individual new chunk is retrieved.** This applies most to the chunks
+  that matter most to H4: new chunks attached weakly to the old graph get short OOS rows, and
+  their directions are the least determined. Row-wise (2→∞) bounds (§7) could close this gap,
+  but only under incoherence assumptions that I have not checked for SpectRAG graphs.
+
+Consequences for §3:
+
+- Level 0 is accepted on `ε_ext ≤ ε_0`, not on `η_prior`. `η_prior` remains a free screen: if
+  Theorem 1(a) does not apply, then `e₂ ≥ δ̂`, so `ℓ ≤ λ_{r−1}`. That is typically below
+  `θ_Z ≈ λ_{r−1}`, so Level 0 is skipped without computing `ε_ext`.
+- H4 logs the fraction of new rows that are individually certified.
+- Whether Level 0 is good enough for new documents is an **empirical** question. P2 and the
+  decision rule in §5 test it on questions whose evidence is in the added documents.
+
 ### 2.5 From subspace drift to retrieval scores and labels
 
 Align the new coordinates to the reference by orthogonal Procrustes (Schönemann 1966):
@@ -247,6 +378,13 @@ The bounds below say what a given `φ` means for retrieval.
 *Proof.* Geodesic distance on the sphere satisfies the triangle inequality, so
 `|∠(a′, b′) − ∠(a, b)| ≤ φ_a + φ_b`, and cos is 1-Lipschitz. By Lemma 1, the result does not
 depend on which `Q` is used. ∎
+
+*Zero rows.* Lemma 3 needs non-zero rows. `_spectral_proximity` maps a zero row to cosine 0
+(diffusion.py:62-64), and a zero seed row contributes 0 to every candidate. Under R2, a chunk's
+row is zero before and after an update exactly when the chunk is outside the eigensolve both
+times, so its contribution does not move. A chunk that *changes* status (it gains or loses its
+last edge) is not covered: its proximity jumps between 0 and a non-zero cosine. Such chunks are
+in `T`, and H4 should count them and log them with the update.
 
 **Proposition 4 (Stage-3 score perturbation).** Let `S` be the seeds and `φ_S = max_{s∈S} φ_s`.
 
@@ -306,8 +444,13 @@ a dense perturbation, plus edges crossing `edge_sparsify_threshold`.
 Two remarks:
 
 1. In multiplex mode, the per-layer normalized Laplacian is invariant to scaling `A_s → cA_s`.
-   A change of `hi` alone (with `lo′ = lo`) is a pure scaling of that layer and therefore has
-   **no effect**. Only `lo` shifts matter.
+   A change of `hi` alone (with `lo′ = lo`) would be a pure scaling of that layer, *if* no score
+   were clipped. Under A2 that is false in exactly the case that matters: a new raw score in
+   `(hi, hi′]` saturates at 1 under the frozen normalizer, but maps to a value below 1 after a
+   rebuild, while the other scores are rescaled by `(hi − lo)/(hi′ − lo)`. That is not a scaling.
+   So the invariance holds **only if no new raw score exceeds the frozen `hi`**. `hi` therefore
+   stays in `ρ_s` in both modes. H4 also counts the clipped edges per signal (`n_clip,s`), and
+   `n_clip,s > 0` in multiplex mode is not treated as harmless.
 2. In combined mode, a change of `hi` re-mixes the layers. It is equivalent to changing `β_s`
    by the factor `(hi − lo)/(hi′ − lo)`.
 
@@ -326,15 +469,20 @@ normalizer checks are relative to the **last full rebuild** `R`.
       η_prior = min( ‖EU‖_F/(δ̂−e₂) if e₂<δ̂ else ∞ ,  2·min(√r·e₂, ‖E‖_F)/δ̂ )
       ρ = Σ_s β_s ρ_s   (frozen vs. current corpus range; §2.6)
 
-    Level 0  EXTEND (no eigensolve) if   η_prior ≤ ε_0  and  ρ ≤ ρ_max
-             new rows: z_{i,l} = (Σ_j N′_ij u_{j,l}) / (1 − λ_l)   (out-of-sample extension)
+    Level 0  EXTEND (no eigensolve), combined mode only (§2.4b), if
+               Theorem 1(a) applies (screen)  and  ℓ = λ̂_r − e₂ > θ_Z
+               and  ε_ext = ‖R_Z‖_F/(ℓ − θ_Z) ≤ ε_0      (Theorem 2b, cost O(nnz(E)·r + |T|·r²))
+               and  ρ ≤ ρ_max
+             stored rows: Z_ext = X̃G^{-1/2}C, with new rows y_{i,l} = (N′U)_{il}/(1 − λ_l)
+             log: ε_ext, fraction of new rows with ‖z_i‖ ≥ √2·ε_ext/s_0 (individually certified)
     Level 1  WARM SOLVE otherwise; accept if   ℓ > θ_{r−1}  and  ε_solve = ‖R̃‖_F/(ℓ − θ_{r−1}) ≤ ε_1
              (ℓ rigorous ⇒ "certified"; ℓ from guard Ritz ⇒ "uncertified", count it)
     Level 2  COLD SOLVE (same graph, fresh start) if Level 1 is not accepted,
              or uncertified_count ≥ N_u, or guard gap (θ_r − θ_{r−1}) < g_min·δ̂_R
     Level 3  FULL REBUILD of global state (normalizers, β, graph, cold solve, KMeans),
              reusing cached per-chunk LLM/embedding outputs, if any of:
-               ρ > ρ_max                             (normalizer drift, §2.6)
+               ρ > ρ_max                             (normalizer drift, §2.6; includes hi in both modes)
+               Σ_s n_clip,s / nnz_s > f_clip          (scores clipped by the frozen hi, §2.6)
                F_lab / n > f_lab                     (label flips, Lemma 6)
                F_nov / |𝒜_since_R| > f_nov           (new chunks farther from every centroid than the
                                                       99th percentile of old nearest-centroid distances)
@@ -344,7 +492,9 @@ Proposed starting values (all to be tuned on dev splits, §5):
 
 | Threshold | Value | Notes |
 | --- | --- | --- |
-| `ε_0` | 0.05 | |
+| `ε_0` | 0.05 | applies to `ε_ext` |
+| `s_0` | 0.2 | row-angle tolerance for logging only (§2.4b(iv)) |
+| `f_clip` | 0.01 | heuristic |
 | `ε_1` | 0.10 | |
 | `ρ_max` | 0.05 | heuristic |
 | `N_u` | 5 | |
@@ -363,7 +513,11 @@ Requirements on H4 implied by the above:
    `1e-7` relative, far below every `ε` above.
 2. Solve on non-isolated nodes only (A1). Check `λ_{r−1} < 1` (A3).
 3. Treat `u_0` explicitly (R1).
-4. Function names are left to the architect. This document does not define public API.
+4. Give chunks outside the eigensolve zero rows and exclude them from the KMeans fit, instead of
+   `_interpolate_isolated` (R2, §2.1). Without R2, Lemma 1 and every bound here cover only the
+   eigensolver rows.
+5. Corpora with `n ≤ k + 1 + p` always rebuild (small-graph edge cases, §1).
+6. Function names are left to the architect. This document does not define public API.
 
 ## 4. Predicted effect
 
@@ -372,8 +526,8 @@ graphs. Predictions for H4 and for the ablation:
 
 | # | Prediction | Metric | Refuted by |
 | --- | --- | --- | --- |
-| P1 | Theorem 1 holds: measured `‖sinΘ‖_F ≤ η_prior` on every update where `η_prior` is finite | theory log | any violation (that means a bug or a broken A2/A3; the theorems themselves are textbook) |
-| P2 | For 1% additions to existing topics, Theorem 1(a) applies and `η_prior / measured ≤ 30` in the median (**CONJECTURE**) | ratio | median ratio > 100: then Level 0 is useless and should be dropped (H4 always warm-solves) |
+| P1 | Theorems 1 and 2b hold: measured `‖sinΘ(U, U′)‖_F ≤ η_prior` whenever `η_prior` is finite, and measured `‖sinΘ(Z_ext, Z′)‖_F ≤ ε_ext` whenever `ε_ext` is defined | theory log | any violation (that means a bug or a broken A2/A3; the theorems themselves are textbook) |
+| P2 | For 1% additions to existing topics in combined mode: (a) `ε_ext` is defined and `ε_ext / measured ≤ 30` in the median, and `ε_ext ≤ ε_0` on most updates (**CONJECTURE**); (b) on questions whose gold evidence is in the added documents `H`, Stage-3 top-10 overlap between Level 0 and A0 is ≥ 0.95 (**CONJECTURE**; §2.4b(iv) gives no row-level guarantee for this) | ratio; `top10_stability` (cross-index) restricted to `H`-evidence questions; `evidence_recall` on them | (a) median ratio > 100, or (b) overlap < 0.95 on any dev dataset: drop Level 0 (H4 always warm-solves) |
 | P3 | A cohesive new topic (one ultradomain domain added at once) makes `e₂ ≥ δ̂`. Theorem 1 does not apply, the Weyl `ℓ` fails, and the trigger escalates to Level 2 or Level 3 | trigger log | Theorem 1(a) applying in this scenario (would mean the new topic is not cohesive in the graph) |
 | P4 | Incremental (Levels 0–2, frozen normalizers and centroids) vs. full rebuild on the same final corpus: Stage-3 top-10 overlap ≥ 0.97, end-to-end top-10 overlap ≥ 0.95, `evidence_recall` within ±0.5 pt, on all six dev datasets, for 1% updates | `top10_stability` (cross-index variant), `evidence_recall`, `mrr` | overlap < 0.95 with certified `ε_solve ≤ 0.1`: Stage-4 discontinuities (labels) dominate and Lemma 6's policy is wrong |
 | P5 | Today's LOBPCG path has `ε_solve > 0.1` at `k = 32`. Two cold LOBPCG builds with different `X0` seeds show `top10_stability < 1` on the largest dev corpus | `top10_stability` across seeds | `ε_solve ≤ 0.01` on all dev corpora, or perfect stability across seeds |
@@ -383,7 +537,8 @@ graphs. Predictions for H4 and for the ablation:
 
 **Step 0 (no LLM, smoke fixture plus fake embedder).** Confirm on a tiny graph that an isolated
 node gets a zero Laplacian row (A1). Confirm that the dropped column equals `±D^{1/2}𝟙/‖·‖` on a
-connected graph (R1).
+connected graph (R1). Confirm that `_interpolate_isolated` rows change under a random rotation
+`Z ↦ ZQ` and that zero rows (R2) do not (§2.1).
 
 **Scenarios.** For each dev dataset (`multihoprag`, `ultradomain`, `musique`, `legal`,
 `hotpotqa`, `2wikimultihopqa`), with corpus `C`:
@@ -416,7 +571,8 @@ connected graph (R1).
 
 **Decision rules.**
 
-- Keep Level 0 only if P2 holds.
+- Keep Level 0 only if both parts of P2 hold. Part (b) is checked on the `H`-evidence
+  questions of U1, because Theorem 2b says nothing about individual new rows.
 - Set `ε_1` to the largest value with A1 end-to-end overlap ≥ 0.95 on the worst dev dataset.
 - Set `ρ_max`, `f_lab` and `f_nov` from A3 and A4 the same way.
 
@@ -433,6 +589,9 @@ Nothing in §2 is a new theorem. The contribution is fitting known results to Sp
 - the rotation-invariance observation (Lemma 1), which reduces drift to subspace angles;
 - the zero-padding of added and removed nodes;
 - the `‖EU‖` form of the a-priori bound;
+- the local evaluation of the Rayleigh–Ritz residual for the out-of-sample basis (Theorem 2b).
+  The bound itself is the standard Davis–Kahan / Rayleigh–Ritz residual bound (Parlett, Ch. 11
+  [chapter unverified]);
 - the explicit identification of global normalizers and the dropped vector `u_0` as the
   non-local parts of an "incremental" update;
 - the leveled trigger.
@@ -481,4 +640,22 @@ cohesive additions? Without it, those updates are "uncertified" and are bounded 
 **Q2 (evaluator).** Add a cross-index `top10_stability` (index A vs. index B on the same
 questions) for Ablation B and for H4's ≥ 95% gate.
 
-Red-team objections and answers: (none yet).
+**Red-team review: pending.** No red-team findings on T5 have been posted to the board yet.
+I have asked on the board to split the item: T5p-a is this proposal, and T5p-b is the red-team
+round and my answers, which will be added to this section. Until a human decides, the "red-team
+objections answered" part of Done-when is still open.
+
+**Review log (Lens, BLOCK on 509eb2f), with answers:**
+
+1. *Rotation invariance fails for `_interpolate_isolated` rows.* Agreed. Lemma 1 is now limited
+   to eigensolver rows (§2.1). The interpolation is described in §1, and requirement R2 (zero
+   rows, excluded from the KMeans fit) is added in §2.1 and §3.
+2. *`η_prior` does not cover the OOS rows of Level 0.* Agreed. §2.4b adds a local a-posteriori
+   certificate `ε_ext` for the stored extended basis (Theorem 2b), and Level 0 now accepts on
+   `ε_ext`. §2.4b(iv) states plainly that this gives no individual guarantee for new rows at
+   realistic `n`. P2 now has an empirical part (b) on new-document questions.
+3. *Header claims red-team objections are answered.* Fixed: the header now says the review is
+   pending, and the split is requested above.
+4. *The `hi`-only change is not a scaling under clipping.* Agreed. §2.6 remark 1 is corrected,
+   `hi` stays in `ρ_s`, and a clipped-edge trigger `f_clip` is added to Level 3.
+5. to 8. (nits): fixed in §2.3, Lemma 2, Lemma 3 (zero rows), and §1 (small-graph cases).
