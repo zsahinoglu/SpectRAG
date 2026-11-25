@@ -231,7 +231,7 @@ class ClusterAwareSelector:
         order: list[int] = []
         while remaining:
             best = diffused_scores.get(remaining[0], 0.0)
-            cutoff = best - self.token_tie_band * best
+            cutoff = best - self.token_tie_band * abs(best)
             band = [gi for gi in remaining if diffused_scores.get(gi, 0.0) >= cutoff]
             # Prefer uncovered documents; break further ties by higher score.
             band.sort(key=lambda gi: (chunks[gi].doc_id in covered, -diffused_scores.get(gi, 0.0)))
@@ -263,8 +263,10 @@ class ClusterAwareSelector:
         if not ranked:
             return []
         top = diffused_scores.get(ranked[0], 0.0)
-        head_floor = self.token_min_rel * top
-        tail_floor = self.token_tail_min_rel * top
+        # Relative floors: top - (1 - rel) * |top|. Equal to rel * top for
+        # positive top; stays below top when diffused scores are negative.
+        head_floor = top - (1.0 - self.token_min_rel) * abs(top)
+        tail_floor = top - (1.0 - self.token_tail_min_rel) * abs(top)
         order = self._coverage_order(ranked, diffused_scores, chunks)
         enc = self._encoder()
         tok_of: dict[int, int] = {}
