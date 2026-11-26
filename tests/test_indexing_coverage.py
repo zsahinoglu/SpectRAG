@@ -81,11 +81,14 @@ def test_multiplex_without_layers_raises():
         SpectralComputer(IndexingConfig()).compute_multiplex({}, EdgeWeights(), _chunks(5))
 
 
-def test_multiplex_lobpcg_path_and_tiny_fallback():
+def test_multiplex_lobpcg_path():
     cfg = IndexingConfig()
     cfg.spectral_large_graph_threshold = 10
     out = SpectralComputer(cfg).compute_multiplex(_signals(), EdgeWeights(), _chunks())
     assert out.shape[0] == N and np.isfinite(out).all()
+
+
+def test_multiplex_tiny_graph_fallback():
     tiny = SpectralComputer(IndexingConfig()).compute_multiplex(
         {"semantic": [RawEdge(0, 1, 1.0)]}, EdgeWeights(), _chunks(2))
     assert tiny.shape == (2, 1)

@@ -52,3 +52,8 @@ generation_eval/.lightrag_work/
 .claude/settings.local.json
 logs/
 .venv/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
