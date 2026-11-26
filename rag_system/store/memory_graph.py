@@ -76,14 +76,21 @@ class InMemoryGraphStore:
         for _ in range(hops):
             if not frontier or len(visited) >= max_candidates:
                 break
-            found = {
-                n for node in frontier if node in self._graph
-                for n in self._graph.neighbors(node)
-            } - visited
-            # Contract (ADR 0007): within a hop, admit new nodes in ascending
-            # chunk_id order until the cap is reached.
+            # Contract (ADR 0007): each unvisited neighbour is ranked by the best
+            # (max) edge weight linking it to the frontier, descending, ties by
+            # ascending chunk_id; admitted in that order until the cap is reached.
+            best: dict[str, float] = {}
+            for node in frontier:
+                if node not in self._graph:
+                    continue
+                for n, attrs in self._graph[node].items():
+                    if n in visited:
+                        continue
+                    w = float(attrs.get("weight", 0.0))
+                    if n not in best or w > best[n]:
+                        best[n] = w
             new_frontier: set[str] = set()
-            for nid in sorted(found):
+            for nid in sorted(best, key=lambda n: (-best[n], n)):
                 if len(visited) >= max_candidates:
                     break
                 visited.add(nid)

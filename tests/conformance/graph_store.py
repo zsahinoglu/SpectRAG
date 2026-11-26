@@ -71,24 +71,27 @@ def check_graph_store(factory) -> None:
     assert store.bfs_expand([], 2, 10) == set()
     assert store.bfs_expand(["a-0"], 9, 100) == {c.chunk_id for c in chunks if c.chunk_id != "z-0"}
 
-    # cap: within a hop, new nodes are admitted in ascending chunk_id order
-    assert store.bfs_expand(["a-0"], 1, 2) == {"a-0", "a-1"}
+    # cap: within a hop, neighbours are admitted by best edge weight (desc), then chunk_id
+    assert store.bfs_expand(["a-0"], 1, 2) == {"a-0", "a-1"}  # 0.5 beats h-0's 0.25
     assert store.bfs_expand(["a-0"], 2, 4) == {"a-0", "a-1", "h-0", "a-2"}
     assert store.bfs_expand(["a-0"], 1, 1) == {"a-0"}
-    # insertion order differs from ascending order: z-9 is linked before a-1
-    zc = _chunks(["a-0", "a-1", "z-9", "b-0", "b-1", "b-2"])
+    # weights and ids disagree: z-9 has the highest weight but the highest id
+    zc = _chunks(["a-0", "a-1", "z-9", "b-0", "b-1", "b-2", "b-3"])
     zg = nx.Graph()
     zg.add_nodes_from(c.chunk_id for c in zc)
-    zg.add_edge("a-0", "z-9", weight=0.9)
     zg.add_edge("a-0", "a-1", weight=0.1)
+    zg.add_edge("a-0", "z-9", weight=0.9)
     zg.add_edge("z-9", "b-2", weight=0.9)
-    zg.add_edge("a-1", "b-0", weight=0.9)
-    zg.add_edge("a-1", "b-1", weight=0.9)
+    zg.add_edge("a-1", "b-0", weight=0.8)
+    zg.add_edge("a-1", "b-3", weight=0.8)
+    zg.add_edge("a-1", "b-1", weight=0.2)
+    zg.add_edge("z-9", "b-1", weight=0.95)  # b-1 ranks by its best frontier edge
     store.write_graph(zc, zg)
-    assert store.bfs_expand(["a-0"], 1, 2) == {"a-0", "a-1"}
-    # two-node frontier {a-1, z-9}: b-0 < b-1 < b-2 regardless of frontier order
-    assert store.bfs_expand(["a-0"], 2, 4) == {"a-0", "a-1", "z-9", "b-0"}
-    assert store.bfs_expand(["a-0"], 2, 5) == {"a-0", "a-1", "z-9", "b-0", "b-1"}
+    assert store.bfs_expand(["a-0"], 1, 2) == {"a-0", "z-9"}
+    # two-node frontier {a-1, z-9}: order b-1 (.95), b-2 (.9), b-0 (.8), b-3 (.8)
+    assert store.bfs_expand(["a-0"], 2, 4) == {"a-0", "a-1", "z-9", "b-1"}
+    assert store.bfs_expand(["a-0"], 2, 5) == {"a-0", "a-1", "z-9", "b-1", "b-2"}
+    assert store.bfs_expand(["a-0"], 2, 6) == {"a-0", "a-1", "z-9", "b-1", "b-2", "b-0"}, "tie: lower id"
     store.write_graph(chunks, g)
 
     # seeds are never dropped, even when they exceed the cap

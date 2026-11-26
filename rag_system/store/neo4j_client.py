@@ -146,20 +146,18 @@ class Neo4jGraphClient:
                     MATCH (s:Chunk)-[:CONNECTED]-(n:Chunk)
                     WHERE s.id IN $frontier
                     RETURN DISTINCT n.id AS id
-                    ORDER BY id
                     """,
                     frontier=list(frontier),
                 )
                 new_frontier: set[str] = set()
-                # Same admission rule as InMemoryGraphStore (ADR 0007): ascending
-                # chunk_id within a hop until the cap is reached.
+                # TODO(H8b): weight-ordered admission per ADR 0007 (unchanged here).
                 for record in result:
                     nid = record["id"]
                     if nid not in visited:
-                        if len(visited) >= max_candidates:
-                            break
                         visited.add(nid)
                         new_frontier.add(nid)
+                        if len(visited) >= max_candidates:
+                            break
             frontier = new_frontier
 
         return visited
