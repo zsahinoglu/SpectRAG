@@ -14,6 +14,52 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+class SparseBM25:
+    """BM25Okapi with a query path that never loops over the corpus in Python.
+
+    ``rank_bm25.BM25Okapi.get_scores`` builds a per-term term-frequency array with
+    a Python comprehension over *every* document, for every query term. Here the
+    index (idf, doc lengths, avgdl) is still built by ``BM25Okapi`` once, so those
+    values are identical; only the query path changes: term frequencies come from
+    per-term postings (doc ids + tf), and only the documents containing a term are
+    touched. The arithmetic per touched document is the same expression, in the
+    same order, so scores equal ``BM25Okapi.get_scores`` element for element
+    (documents without the term get the same 0 contribution).
+    """
+
+    def __init__(self, corpus: list[list[str]]) -> None:
+        from rank_bm25 import BM25Okapi
+        ref = BM25Okapi(corpus)
+        self.idf = ref.idf
+        self.k1, self.b, self.avgdl = ref.k1, ref.b, ref.avgdl
+        self.corpus_size = ref.corpus_size
+        self.doc_len = np.asarray(ref.doc_len)
+        ids: dict[str, list[int]] = {}
+        tfs: dict[str, list[int]] = {}
+        for di, freqs in enumerate(ref.doc_freqs):
+            for word, tf in freqs.items():
+                ids.setdefault(word, []).append(di)
+                tfs.setdefault(word, []).append(tf)
+        self._postings = {
+            w: (np.asarray(ids[w], dtype=np.int64), np.asarray(tfs[w]))
+            for w in ids
+        }
+
+    def get_scores(self, query: list[str]) -> np.ndarray:
+        score = np.zeros(self.corpus_size)
+        for q in query:
+            post = self._postings.get(q)
+            if post is None:
+                continue
+            doc_ids, tf = post
+            idf = self.idf.get(q) or 0
+            score[doc_ids] += idf * (
+                tf * (self.k1 + 1)
+                / (tf + self.k1 * (1 - self.b + self.b * self.doc_len[doc_ids] / self.avgdl))
+            )
+        return score
+
+
 class SeedRetriever:
     """Stage 1 — produce initial seed chunk indices.
 
@@ -44,6 +90,10 @@ class SeedRetriever:
         # BM25 lexical index, rebuilt when the corpus changes.
         self._bm25 = None
         self._bm25_key: tuple | None = None
+        # Dense embedding matrix, rebuilt when the corpus changes.
+        self._emb_matrix: np.ndarray | None = None
+        self._emb_key: tuple | None = None
+        self._emb_src: list | None = None
 
     @staticmethod
     def _corpus_key(chunks: list[Chunk]) -> tuple:
@@ -117,12 +167,28 @@ class SeedRetriever:
             return self._bm25 is not None
         self._bm25_key = key
         self._bm25 = None
-        from rank_bm25 import BM25Okapi
         corpus = [_tokenize(c.text) for c in chunks]
         if not any(corpus):
             return False
-        self._bm25 = BM25Okapi(corpus)
+        self._bm25 = SparseBM25(corpus)
         return True
+
+    def _dense_matrix(self, chunks: list[Chunk]) -> np.ndarray:
+        """(N, D) float32 embedding matrix, stacked once per corpus rather than
+        once per query. The key adds the boundary embeddings' identity to the
+        corpus key so re-embedded chunks invalidate the cache. A strong reference
+        to the source list is also required (`is`), so id() reuse cannot alias.
+        TODO(H4): in-place edits of a middle chunk's embedding are not detected;
+        incremental indexing must invalidate explicitly."""
+        key = self._corpus_key(chunks) + (
+            (id(chunks[0].embedding), id(chunks[-1].embedding)) if chunks else ()
+        )
+        if (self._emb_key != key or self._emb_matrix is None
+                or self._emb_src is not chunks):
+            self._emb_matrix = np.stack([c.embedding for c in chunks]).astype(np.float32)
+            self._emb_key = key
+            self._emb_src = chunks
+        return self._emb_matrix
 
     def _bm25_ranking(self, query: str, chunks: list[Chunk]) -> list[int]:
         """Chunk indices ranked by BM25 lexical score (positive scores only)."""
@@ -157,7 +223,7 @@ class SeedRetriever:
         k = min(self.k, len(chunks))
 
         # Full dense similarity vector — cosine, consumed by diffusion + selection.
-        all_embs = np.stack([c.embedding for c in chunks]).astype(np.float32)
+        all_embs = self._dense_matrix(chunks)
         all_scores = (all_embs @ q_emb.T).squeeze()    # (N,)
 
         # Hybrid lexical relevance: fold normalized BM25 into the relevance vector
