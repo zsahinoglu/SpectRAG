@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import faiss
 
-from spectrag.models import Chunk, QueryResult
+from spectrag.models import Chunk, ChunkExplanation, QueryResult
 from spectrag.protocols import Embedder, IndexLLM
 from rag_system.components import build_embedder
 from rag_system.query.seed_retrieval import SeedRetriever
@@ -50,8 +50,9 @@ class QueryPipeline:
         neo4j_client: Neo4jGraphClient,
     ) -> QueryResult:
         logger.info("Stage 1 — seed retrieval")
+        seed_trace: dict = {}
         seed_indices, all_scores = self.seed_retriever.retrieve(
-            question, chunks, faiss_index
+            question, chunks, faiss_index, trace=seed_trace
         )
         logger.info("  → %d seeds", len(seed_indices))
 
@@ -64,8 +65,10 @@ class QueryPipeline:
         subgraph = neo4j_client.subgraph(candidate_chunk_ids)
 
         logger.info("Stage 3 — proximity re-scoring (spectral / PPR)")
+        diffuse_trace: dict = {}
         diffused_scores = self.diffuser.diffuse(
-            candidate_indices, seed_indices, all_scores, chunks, subgraph
+            candidate_indices, seed_indices, all_scores, chunks, subgraph,
+            trace=diffuse_trace,
         )
 
         logger.info("Stage 4 — cluster-aware selection")
@@ -82,7 +85,36 @@ class QueryPipeline:
             chunks[i].chunk_id: diffused_scores.get(i, 0.0)
             for i in selected_indices
         }
-        return QueryResult(chunks=selected_chunks, answer=answer, scores=scores)
+        explanations = self._explain(
+            selected_indices, seed_indices, all_scores, diffused_scores,
+            seed_trace, diffuse_trace, chunks,
+        )
+        return QueryResult(chunks=selected_chunks, answer=answer, scores=scores,
+                           explanations=explanations)
+
+    @staticmethod
+    def _explain(selected, seed_indices, all_scores, diffused, seed_trace,
+                 diffuse_trace, chunks) -> list[ChunkExplanation]:
+        """Read-only provenance for QueryResult.explain(); touches no ranking."""
+        seeds = set(seed_indices)
+        rankings = seed_trace.get("rankings", {})
+        out = []
+        for i in selected:
+            ranks = {src: lst.index(i) + 1 for src, lst in rankings.items()
+                     if i in lst} if i in seeds else {}
+            parts = {"relevance": float(all_scores[i])}
+            for key, name in (("spectral", "spectral_proximity"),
+                              ("ppr", "ppr_proximity")):
+                prox = diffuse_trace.get(key)
+                if prox is not None and i in prox:
+                    parts[name] = float(prox[i])
+            parts["diffused"] = float(diffused.get(i, 0.0))
+            parts["final"] = parts["diffused"]
+            out.append(ChunkExplanation(
+                chunk_id=chunks[i].chunk_id,
+                seed_source=tuple(ranks) or ("graph_expansion",),
+                seed_ranks=ranks, score_parts=parts))
+        return out
 
     def close(self) -> None:
         self.generator.close()

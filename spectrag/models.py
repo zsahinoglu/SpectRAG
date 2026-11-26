@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-__all__ = ["Chunk", "QueryResult"]
+__all__ = ["Chunk", "ChunkExplanation", "QueryResult"]
 
 
 @dataclass
@@ -37,8 +37,32 @@ class Chunk:
         return self.chunk_id == other.chunk_id
 
 
+@dataclass(frozen=True)
+class ChunkExplanation:
+    """Why one chunk was selected (provisional names until ARCH3 freezes the API).
+
+    seed_source: retrievers that put the chunk in the seed set, from
+        'dense', 'utility_question', 'bm25'; ('graph_expansion',) if it entered
+        only through graph expansion.
+    seed_ranks:  source -> 1-based rank in that source's ranking.
+    score_parts: relevance (hybrid dense/BM25 relevance), spectral_proximity and
+        ppr_proximity (absent when not computed), diffused (the combined score),
+        final (the score reported in QueryResult.scores).
+    """
+    chunk_id: str
+    seed_source: tuple[str, ...]
+    seed_ranks: dict[str, int]
+    score_parts: dict[str, float]
+
+
 @dataclass
 class QueryResult:
     chunks: list[Chunk]
     answer: str
     scores: dict[str, float]        # chunk_id → final relevance score
+    explanations: list[ChunkExplanation] = field(
+        default_factory=list, repr=False, compare=False)
+
+    def explain(self) -> list[ChunkExplanation]:
+        """One ChunkExplanation per selected chunk, in selection order."""
+        return list(self.explanations)

@@ -219,11 +219,15 @@ class SeedRetriever:
         query: str,
         chunks: list[Chunk],
         faiss_index: faiss.Index,
+        trace: dict | None = None,
     ) -> tuple[list[int], np.ndarray]:
         """
         Returns:
             seed_indices   — top-K chunk indices (dense, or RRF-fused with UQ hits)
             all_scores     — (N,) dense cosine vector across all chunks (Stage 3 input)
+
+        `trace`, if given, is filled with {"rankings": {source: [chunk idx, ...]}}
+        for explain(); it never affects the result.
         """
         q_emb = self.embedder.embed([query], kind="query")    # (1, D) normalized
         k = min(self.k, len(chunks))
@@ -252,14 +256,19 @@ class SeedRetriever:
         # Fuse dense with the utility-question and BM25 rankings (whichever are
         # enabled and non-empty) via Reciprocal Rank Fusion.
         ranked_lists = [dense_rank]
+        named = {"dense": dense_rank}
         if self.uq_enabled:
             uq_rank = self._uq_seed_ranking(q_emb, chunks)
             if uq_rank:
                 ranked_lists.append(uq_rank)
+                named["utility_question"] = uq_rank
         if self.bm25_enabled:
             bm25_rank = self._bm25_ranking(bm25_raw)
             if bm25_rank:
                 ranked_lists.append(bm25_rank)
+                named["bm25"] = bm25_rank
+        if trace is not None:
+            trace["rankings"] = {k: list(v) for k, v in named.items()}
 
         if len(ranked_lists) == 1:
             return dense_rank[:k], all_scores
