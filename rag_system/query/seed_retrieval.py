@@ -93,6 +93,7 @@ class SeedRetriever:
         # Dense embedding matrix, rebuilt when the corpus changes.
         self._emb_matrix: np.ndarray | None = None
         self._emb_key: tuple | None = None
+        self._emb_src: list | None = None
 
     @staticmethod
     def _corpus_key(chunks: list[Chunk]) -> tuple:
@@ -175,13 +176,18 @@ class SeedRetriever:
     def _dense_matrix(self, chunks: list[Chunk]) -> np.ndarray:
         """(N, D) float32 embedding matrix, stacked once per corpus rather than
         once per query. The key adds the boundary embeddings' identity to the
-        corpus key so re-embedded chunks invalidate the cache."""
+        corpus key so re-embedded chunks invalidate the cache. A strong reference
+        to the source list is also required (`is`), so id() reuse cannot alias.
+        TODO(H4): in-place edits of a middle chunk's embedding are not detected;
+        incremental indexing must invalidate explicitly."""
         key = self._corpus_key(chunks) + (
             (id(chunks[0].embedding), id(chunks[-1].embedding)) if chunks else ()
         )
-        if self._emb_key != key or self._emb_matrix is None:
+        if (self._emb_key != key or self._emb_matrix is None
+                or self._emb_src is not chunks):
             self._emb_matrix = np.stack([c.embedding for c in chunks]).astype(np.float32)
             self._emb_key = key
+            self._emb_src = chunks
         return self._emb_matrix
 
     def _bm25_ranking(self, query: str, chunks: list[Chunk]) -> list[int]:

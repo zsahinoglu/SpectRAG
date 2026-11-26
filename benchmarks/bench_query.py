@@ -49,8 +49,11 @@ def old_scores(retr, query, chunks, q_emb, bm25_ref):
     all_scores = (np.stack([c.embedding for c in chunks]).astype(np.float32) @ q_emb.T).squeeze()
     bm = np.clip(np.asarray(bm25_ref.get_scores(_tokenize(query)), dtype=np.float64), 0.0, None)
     w = retr.hybrid_lex_w
+    if not (w > 0 and retr.bm25_enabled) or bm.max() <= 0:
+        return all_scores            # mirrors retrieve(): hybrid blend skipped
     dmax = float(all_scores.max())
-    return (1.0 - w) * (all_scores / dmax) + w * (bm / bm.max())
+    dense_n = all_scores / dmax if dmax > 0 else all_scores
+    return (1.0 - w) * dense_n + w * (bm / bm.max())
 
 
 def timed(fn, reps):

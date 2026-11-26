@@ -97,6 +97,21 @@ def test_expander_matches_old_lookup_and_survives_corpus_change():
     assert ex.expand([0], b, _Neo(ids)) == old(b)
 
 
+def test_expander_sees_new_middle_id_with_same_length_and_boundaries():
+    ex = GraphExpander(make_config())
+    a = _synthetic_chunks(30)
+    ids = ["c5", "cNEW", "c1"]
+    ex.expand([0], a, _Neo(ids))                      # warm the cache
+    b = list(a)
+    b[10] = Chunk(chunk_id="cNEW", doc_id="d1", text="x", position=10,
+                  section_path=[], references=[])
+    assert ex.expand([0], b, _Neo(ids)) == [5, 10, 1]
+    # in-place mutation of the same list object is also picked up
+    a[12] = Chunk(chunk_id="cNEW", doc_id="d1", text="y", position=12,
+                  section_path=[], references=[])
+    assert ex.expand([0], a, _Neo(ids)) == [5, 12, 1]
+
+
 def test_golden_questions_unchanged_through_retrieve():
     """Seeds for the golden corpus equal those from a fresh retriever (no cache state)."""
     cfg, emb, chunks, faiss_index, _store = build_index()

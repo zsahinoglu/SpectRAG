@@ -32,19 +32,25 @@ class GraphExpander:
             seed_chunk_ids, self.hops, self.max_candidates
         )
 
+        if any(cid not in chunk_id_to_idx for cid in expanded_ids):
+            # An id the cached map does not know: the corpus may have changed under
+            # the same key (e.g. a middle chunk re-indexed). Rebuild once, look up again.
+            chunk_id_to_idx = self._id_map(chunks, force=True)
         pairs = [(cid, chunk_id_to_idx[cid]) for cid in expanded_ids if cid in chunk_id_to_idx]
         if any(chunks[i].chunk_id != cid for cid, i in pairs):
-            # Cached map is stale (corpus changed under the same size/boundaries):
-            # rebuild it once and redo the lookup.
-            self._map_key = None
-            chunk_id_to_idx = self._id_map(chunks)
+            # Known id now at another position: stale map, rebuild and redo.
+            chunk_id_to_idx = self._id_map(chunks, force=True)
             pairs = [(cid, chunk_id_to_idx[cid]) for cid in expanded_ids if cid in chunk_id_to_idx]
         return [i for _cid, i in pairs]
 
-    def _id_map(self, chunks: list[Chunk]) -> dict[str, int]:
-        """chunk_id → index, built once per corpus instead of once per query."""
+    def _id_map(self, chunks: list[Chunk], force: bool = False) -> dict[str, int]:
+        """chunk_id → index, built once per corpus instead of once per query.
+        Holds a strong reference to the source list, so the `is` check cannot be
+        fooled by id() reuse."""
         key = (len(chunks), chunks[0].chunk_id, chunks[-1].chunk_id) if chunks else (0,)
-        if getattr(self, "_map_key", None) != key:
+        if (force or getattr(self, "_map_src", None) is not chunks
+                or getattr(self, "_map_key", None) != key):
             self._map = {c.chunk_id: i for i, c in enumerate(chunks)}
             self._map_key = key
+            self._map_src = chunks
         return self._map
