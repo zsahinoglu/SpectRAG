@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      # H1b: >= 80% line coverage on indexing and query code. Switch these paths
+      # to spectrag/index and spectrag/retrieve once the code moves (ARCH1).
+      - run: >
+          python -m pytest -q
+          --cov=rag_system/indexing --cov=rag_system/query
+          --cov-fail-under=80
