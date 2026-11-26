@@ -109,6 +109,7 @@ class RelevanceDiffuser:
         all_scores: np.ndarray,
         chunks: list[Chunk],
         graph=None,
+        trace: dict | None = None,
     ) -> dict[int, float]:
         """Returns {chunk_global_idx: combined_score} for every candidate.
 
@@ -124,6 +125,9 @@ class RelevanceDiffuser:
             spectral = self._spectral_proximity(candidate_indices, seed_indices, all_scores, chunks)
         if self._mode in ("ppr", "hybrid"):
             ppr = self._ppr_proximity(candidate_indices, seed_indices, chunks, graph)
+
+        if trace is not None:   # read-only side-channel for explain()
+            trace["spectral"], trace["ppr"] = spectral, ppr
 
         # If nothing usable, fall back to raw cosine ranking.
         if spectral is None and ppr is None:
