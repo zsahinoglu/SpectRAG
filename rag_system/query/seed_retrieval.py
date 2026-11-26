@@ -190,21 +190,27 @@ class SeedRetriever:
             self._emb_src = chunks
         return self._emb_matrix
 
-    def _bm25_ranking(self, query: str, chunks: list[Chunk]) -> list[int]:
-        """Chunk indices ranked by BM25 lexical score (positive scores only)."""
+    def _bm25_raw(self, query: str, chunks: list[Chunk]) -> np.ndarray | None:
+        """Raw full-corpus BM25 scores, computed once per query and shared by the
+        seed ranking and the hybrid relevance blend. None if BM25 is unavailable."""
         if not self._build_bm25(chunks):
+            return None
+        return np.asarray(self._bm25.get_scores(_tokenize(query)))
+
+    def _bm25_ranking(self, scores: np.ndarray | None) -> list[int]:
+        """Chunk indices ranked by BM25 lexical score (positive scores only)."""
+        if scores is None:
             return []
-        scores = self._bm25.get_scores(_tokenize(query))
         order = np.argsort(-scores)
         return [int(i) for i in order[: self.bm25_k] if scores[i] > 0.0]
 
-    def _bm25_scores_full(self, query: str, chunks: list[Chunk]) -> np.ndarray | None:
-        """Full-corpus BM25 scores, min-floored at 0 and max-normalised to [0,1].
+    @staticmethod
+    def _bm25_scores_full(scores: np.ndarray | None) -> np.ndarray | None:
+        """Raw BM25 scores min-floored at 0 and max-normalised to [0,1].
         None if BM25 is unavailable or the query matched nothing lexically."""
-        if not self._build_bm25(chunks):
+        if scores is None:
             return None
-        scores = np.asarray(self._bm25.get_scores(_tokenize(query)), dtype=np.float64)
-        scores = np.clip(scores, 0.0, None)
+        scores = np.clip(np.asarray(scores, dtype=np.float64), 0.0, None)
         smax = scores.max()
         return scores / smax if smax > 0 else None
 
@@ -230,8 +236,9 @@ class SeedRetriever:
         # so lexical precision (exact terms) drives Stage-3 diffusion and Stage-4
         # selection, not just the seed choice. Naive keeps a separate pure-dense
         # path, so this is a genuine SpectRAG-only signal.
+        bm25_raw = self._bm25_raw(query, chunks) if self.bm25_enabled else None
         if self.hybrid_lex_w > 0 and self.bm25_enabled:
-            bm25_all = self._bm25_scores_full(query, chunks)
+            bm25_all = self._bm25_scores_full(bm25_raw)
             if bm25_all is not None:
                 dmax = float(all_scores.max())
                 dense_n = all_scores / dmax if dmax > 0 else all_scores
@@ -250,7 +257,7 @@ class SeedRetriever:
             if uq_rank:
                 ranked_lists.append(uq_rank)
         if self.bm25_enabled:
-            bm25_rank = self._bm25_ranking(query, chunks)
+            bm25_rank = self._bm25_ranking(bm25_raw)
             if bm25_rank:
                 ranked_lists.append(bm25_rank)
 

@@ -129,6 +129,47 @@ def test_expander_rebuilds_on_unknown_id_after_in_place_mutation():
     assert ex._map is not cached                      # the rebuild branch ran
 
 
+@pytest.mark.parametrize("w", [0.0, 0.3])
+def test_bm25_scored_once_per_query_and_output_unchanged(w):
+    """Seeds and relevance vector equal the old two-computation path exactly, and
+    BM25 get_scores runs once per query (not once per consumer)."""
+    import faiss
+    chunks = _synthetic_chunks(300, seed=5)
+    cfg = make_config()
+    cfg.retrieval.uq_seed_enabled = False
+    cfg.retrieval.hybrid_lexical_weight = w
+    emb = FakeEmbedder()
+    index = faiss.IndexFlatIP(64)
+    index.add(np.stack([c.embedding for c in chunks]).astype(np.float32))
+    sr = SeedRetriever(cfg, emb)
+    ref = BM25Okapi([_tokenize(c.text) for c in chunks])
+    calls = []
+    orig = sr._bm25_raw
+    sr._bm25_raw = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+    for q in ("star fusion helium", "bread dough", "zzz unknown", "salt water salt"):
+        calls.clear()
+        seeds, scores = sr.retrieve(q, chunks, index)
+        assert len(calls) == 1
+        q_emb = emb.embed([q], kind="query")
+        dense = (np.stack([c.embedding for c in chunks]).astype(np.float32) @ q_emb.T).squeeze()
+        raw = np.asarray(ref.get_scores(_tokenize(q)))
+        bm = np.clip(raw.astype(np.float64), 0.0, None)
+        exp = dense
+        if w > 0 and bm.max() > 0:
+            dmax = float(dense.max())
+            dn = dense / dmax if dmax > 0 else dense
+            exp = (1.0 - w) * dn + w * (bm / bm.max())
+        np.testing.assert_array_equal(scores, exp)
+        _, di = index.search(q_emb, min(max(sr.k, sr.uq_k), len(chunks)))
+        lists = [[int(i) for i in di[0] if i >= 0]]
+        order = np.argsort(-raw)
+        bl = [int(i) for i in order[: sr.bm25_k] if raw[i] > 0.0]
+        if bl:
+            lists.append(bl)
+        exp_seeds = lists[0][: sr.k] if len(lists) == 1 else sr._rrf(lists)[: sr.k]
+        assert seeds == exp_seeds
+
+
 def test_golden_questions_unchanged_through_retrieve():
     """Seeds for the golden corpus equal those from a fresh retriever (no cache state)."""
     cfg, emb, chunks, faiss_index, _store = build_index()
