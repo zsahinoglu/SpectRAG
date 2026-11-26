@@ -105,11 +105,28 @@ def test_expander_sees_new_middle_id_with_same_length_and_boundaries():
     b = list(a)
     b[10] = Chunk(chunk_id="cNEW", doc_id="d1", text="x", position=10,
                   section_path=[], references=[])
-    assert ex.expand([0], b, _Neo(ids)) == [5, 10, 1]
-    # in-place mutation of the same list object is also picked up
-    a[12] = Chunk(chunk_id="cNEW", doc_id="d1", text="y", position=12,
+    old = lambda cs: [{c.chunk_id: i for i, c in enumerate(cs)}[x]
+                      for x in ids if x in {c.chunk_id for c in cs}]
+    assert ex.expand([0], b, _Neo(ids)) == old(b)
+
+
+def test_expander_rebuilds_on_unknown_id_after_in_place_mutation():
+    """Same list object, same length and boundary ids: only the unknown-id rebuild
+    can notice the new middle id (the identity/key checks both pass)."""
+    ex = GraphExpander(make_config())
+    b = _synthetic_chunks(30)
+    ids = ["c5", "cNEW2", "c1"]
+    old = lambda cs: [{c.chunk_id: i for i, c in enumerate(cs)}[x]
+                      for x in ids if x in {c.chunk_id for c in cs}]
+    assert ex.expand([0], b, _Neo(ids)) == old(b)     # warms the cache on this exact list
+    cached = ex._map
+    b[12] = Chunk(chunk_id="cNEW2", doc_id="d1", text="y", position=12,
                   section_path=[], references=[])
-    assert ex.expand([0], a, _Neo(ids)) == [5, 12, 1]
+    assert ex._map_src is b and ex._map is cached     # cache is stale for b
+    result = ex.expand([0], b, _Neo(ids))
+    assert result == old(b)
+    assert 12 in result
+    assert ex._map is not cached                      # the rebuild branch ran
 
 
 def test_golden_questions_unchanged_through_retrieve():
