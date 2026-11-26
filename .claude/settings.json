@@ -26,7 +26,10 @@
       "Bash(scripts/board.sh *)",
       "Bash(git merge origin/main*)",
       "Bash(git branch *)",
-      "Bash(git worktree list*)"
+      "Bash(git worktree list*)",
+      "Bash(python benchmarks/*)",
+      "Bash(python -m benchmarks*)",
+      "Bash(git rm --cached *)"
     ],
     "deny": [
       "Bash(git push --force *)",
